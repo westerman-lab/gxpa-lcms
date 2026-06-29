@@ -21,3 +21,6 @@ scratch/
 *.png
 *.RData
 *.rds
+
+.ipynb_checkpoints/
+.virtual_documents/
