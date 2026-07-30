@@ -14,7 +14,7 @@ This code will only work on Linux or Mac (not Windows), because it uses `paralle
 
 # GxPA LC-MS
 
-The overall goal of this project is to identify metabolite mediators of a previously-identified gene-physical activity interaction at the *CLASP1* locus, using MESA as the primary dataset.
+The overall goal of this project is to identify metabolite mediators of a previously-identified gene-physical activity interaction, using MESA as the primary dataset.
 
 The analysis is organized as a set of R Jupyter notebooks (`.ipynb`), numbered in the order in which they should be run.
 
