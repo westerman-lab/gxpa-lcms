@@ -71,3 +71,39 @@ git push
 
 Pull the same way on your laptop to inspect. Notebook data still comes from the
 workspace bucket via `gcloud storage` as before; that is independent of git.
+
+## Running or sharing in the workspace (publish to the bucket, not `edit/`)
+
+Running notebooks straight from the `~/repos/gxpa-lcms` clone (as above) is the simplest
+and safest option — that folder is never auto-synced, so nothing clobbers it. Do that
+unless you specifically want the notebook to appear in the Terra **Notebooks/Analyses**
+tab, e.g. to run it in the workspace UI or share it with a collaborator who does not use
+git.
+
+If you do want the workspace copy, **do not copy the file into the workspace `edit/`
+folder.** Terra re-localizes that folder from the workspace bucket every few seconds, so a
+file dropped there is overwritten by the bucket's (old) copy on the next reload. Instead,
+write your git-versioned copy **directly to the bucket that `edit/` syncs from.** The
+bucket is the source of truth for the sync, so Terra then localizes *your* version down
+into `edit/`.
+
+```bash
+cd ~/repos/gxpa-lcms
+git pull                          # get the latest into the clone (the source of truth)
+
+# Find which prefix Terra uses for this workspace's notebooks (one of these will exist):
+gcloud storage ls "$WORKSPACE_BUCKET/notebooks/" "$WORKSPACE_BUCKET/analyses/" 2>/dev/null
+
+# Publish the clone's copy to that prefix (use whichever the command above showed):
+gcloud storage cp 02b_analysis.ipynb "$WORKSPACE_BUCKET/notebooks/02b_analysis.ipynb"
+```
+
+Then reload the notebook in the workspace tab; it will localize the copy you just
+published instead of the stale one.
+
+**Keep this one-directional: `repos/` → bucket, never the reverse.** The clone stays the
+single source of truth. Editing in the workspace `edit/` folder delocalizes back to the
+bucket but **not** to git, so any change made there drifts from — and is eventually lost
+against — the repo. Always edit and `git commit` in `~/repos/gxpa-lcms`, then re-publish
+to the bucket. Treat the workspace copy as a disposable run/display target, not a place to
+author changes.
