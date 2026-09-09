@@ -592,6 +592,8 @@ sim_tie     <- read_sim("tie_summary.csv")
 sim_tie_b   <- read_sim("tie_scenarioB_summary.csv")
 sim_tie_c   <- read_sim("tie_scenarioC_summary.csv")
 sim_gamma   <- read_sim("tie_gamma_summary.csv")
+dag_nodes   <- read_sim("dag_nodes.csv")
+dag_edges   <- read_sim("dag_edges.csv")
 
 sim_param <- function(name, default = NA) {
   if (!have(sim_params)) return(default)
@@ -615,6 +617,8 @@ variant_labels <- c(full         = "Baseline",
 icc_labels  <- c(perfect = "Perfect measurement",
                  default = "Realistic measurement error")
 medmod_labels <- c(perfect = "Perfect (ICC = 1)", realistic = "Realistic (ICC = 0.5)")
+scenario_labels <- c(A = "Molecular mediator (primary)", B = "Upstream GxE",
+                     C = "Reverse causation",            D = "E-M Confounding")
 
 sim_cols   <- c(GxE = "#d95f02", GxM = "#1b9e77", Mediation = "#7570b3")
 sim_shapes <- c(GxE = 17, GxM = 16, Mediation = 15)
@@ -660,12 +664,57 @@ label_icc   <- function(dat) mutate(dat, condition = factor(unname(icc_labels[ic
                                                             levels = unname(icc_labels)))
 ```
 
+## Causal scenarios
+
+```{r sim-dags, fig.width = 11, fig.asp = 0.30}
+# The notebook writes the DAG geometry already resolved (edges trimmed back off
+# the node labels, modifier arrows anchored to the midpoint of the edge they
+# modify, coefficient labels offset perpendicular to their arrow), so this only
+# has to draw it. Rendering here rather than in the notebook keeps every
+# manuscript figure on one styling layer.
+build_dag <- function(which_scenarios) {
+  if (!have(dag_nodes) || !have(dag_edges)) return(NULL)
+  e <- filter(dag_edges, scenario %in% which_scenarios)
+  n <- filter(dag_nodes, scenario %in% which_scenarios)
+  ggplot() +
+    geom_segment(data = e,
+                 aes(x = x, y = y, xend = xend, yend = yend,
+                     linetype = kind, color = kind),
+                 arrow = arrow(length = unit(0.10, "in"), type = "closed"),
+                 linewidth = 0.55) +
+    geom_text(data = e, aes(x = label_x, y = label_y, label = label, color = kind),
+              parse = TRUE, size = 3.7, show.legend = FALSE) +
+    geom_label(data = n, aes(x = x, y = y, label = node),
+               size = 4.6, fontface = "bold", fill = "white",
+               label.padding = unit(0.22, "lines")) +
+    facet_wrap(~ scenario, nrow = 1, labeller = labeller(scenario = scenario_labels)) +
+    scale_linetype_manual(values = c(main = "solid", mod = "dashed")) +
+    scale_color_manual(values    = c(main = "grey20", mod = "firebrick")) +
+    coord_cartesian(xlim = c(-0.2, 2.2), ylim = c(-0.4, 1.5), clip = "off", expand = FALSE) +
+    theme_void(base_size = 13) +
+    theme(legend.position = "none",
+          strip.text    = element_text(face = "bold"),
+          panel.spacing = unit(0.2, "lines"),
+          plot.margin   = margin(2, 2, 2, 2))
+}
+
+dag_all <- build_dag(c("A", "B", "C", "D"))
+if (!is.null(dag_all)) print(dag_all) else
+  cat("results/simulation/dag_nodes.csv and dag_edges.csv not available - skipping.\n")
+```
+
+Solid arrows are main effects; dashed red arrows are interaction terms, drawn
+landing on the edge they modify. Scenario A is the mediation model the screen
+assumes; B, C and D are the non-mediating structures that can still produce a
+GxM signal.
+
 ## Power under true mediation (Scenario A)
 
 ```{r sim-power, fig.asp = 0.5}
 if (have(sim_power)) {
-  print(sim_curve(label_tests(sim_power), beta_GxM,
-                  expression(paste("True ", beta[GxM]))))
+  power_panel <<- sim_curve(label_tests(sim_power), beta_GxM,
+                            expression(paste("True ", beta[GxM])))
+  print(power_panel)
 
   write_csv(sim_power, "output/manuscript/sim_power.csv")
 } else cat("results/simulation/power_summary.csv not available - skipping.\n")
@@ -680,7 +729,7 @@ on the identity line.
 if (have(sim_power_z)) {
   r <- cor(sim_power_z$z_gxm, sim_power_z$z_gxm_adj)
 
-  print(
+  power_z_panel <<-
     ggplot(sim_power_z, aes(z_gxm, z_gxm_adj, color = factor(beta_GxM))) +
       geom_abline(slope = 1, intercept = 0, color = "grey50", linetype = "dashed") +
       geom_point(alpha = 0.5, size = 1.3) +
@@ -689,7 +738,7 @@ if (have(sim_power_z)) {
       labs(x = "GxM z (unadjusted)", y = "GxM z (G:E-adjusted)",
            subtitle = sprintf("Pearson r = %.4f", r)) +
       theme(legend.position = "bottom")
-  )
+  print(power_z_panel)
 } else cat("results/simulation/power_z_replicates.csv not available - skipping.\n")
 ```
 
@@ -734,10 +783,10 @@ tie_variant_panel <- function(dat, title, fill) {
     sim_bars(title, fill)
 }
 
-panel_b <- tie_variant_panel(sim_tie_b, "Upstream GxE", "#7570b3")
-panel_c <- tie_variant_panel(sim_tie_c, "Reverse causation", "#d95f02")
+panel_b <<- tie_variant_panel(sim_tie_b, "Upstream GxE", "#7570b3")
+panel_c <<- tie_variant_panel(sim_tie_c, "Reverse causation", "#d95f02")
 
-panel_d <- if (have(sim_tie)) {
+panel_d <<- if (have(sim_tie)) {
   sim_tie %>%
     filter(scenario == "D", test != "p_gxe") %>%
     label_icc() %>%
@@ -772,6 +821,38 @@ if (have(sim_tie)) {
     kable_styling(full_width = FALSE)
 
   write_csv(sim_tie, "output/manuscript/sim_type1_error.csv")
+}
+```
+
+## Combined manuscript figure
+
+```{r sim-combined, fig.width = 12, fig.asp = 0.92}
+# Reassembles the panels built above; nothing is recomputed. Missing inputs drop
+# their row rather than failing the figure.
+top_row <- if (!is.null(build_dag("A")) && exists("power_panel") && exists("power_z_panel")) {
+  build_dag("A") + power_panel + power_z_panel + plot_layout(widths = c(1, 1.4, 1.2))
+} else NULL
+
+mid_row <- build_dag(c("B", "C", "D"))
+
+tie_panels <- compact(list(
+  if (exists("panel_b")) panel_b, if (exists("panel_c")) panel_c,
+  if (exists("panel_d")) panel_d))
+bot_row <- if (length(tie_panels)) {
+  wrap_plots(tie_panels, nrow = 1) + plot_layout(guides = "collect") &
+    theme(legend.position = "bottom")
+} else NULL
+
+rows <- compact(list(top_row, mid_row, bot_row))
+if (length(rows) == 3) {
+  combined_fig <- rows[[1]] / rows[[2]] / rows[[3]] +
+    plot_layout(heights = c(1.0, 0.8, 1.3)) +
+    plot_annotation(tag_levels = "A") &
+    theme(plot.tag = element_text(face = "bold", size = 16))
+  print(combined_fig)
+} else {
+  cat("Need the DAG tables, the power summaries and the type I error summaries",
+      "to assemble the combined figure -", length(rows), "of 3 rows available.\n")
 }
 ```
 
