@@ -59,9 +59,39 @@ if (have(met_info) && !("met_label" %in% names(met_info))) {
       TRUE               ~ paste0("m/z ", round(MZ, 4))))
 }
 
-variants_of_interest <- if (file.exists("variants_of_interest.csv")) {
+# Ground truth for this table is the workspace bucket: on Terra only *.ipynb
+# reaches the VM working directory, so the notebooks cannot read a repo-side CSV
+# and 01b/02b/03c all read the bucket copy. Read the same copy they do, so this
+# report and 02b can never disagree about gene assignments. Fall back to the repo
+# copy when the bucket is unreachable, and say which was used.
+voi_bucket <- paste0(Sys.getenv("WORKSPACE_BUCKET",
+                                unset = "gs://fc-secure-4a392455-5587-4d6f-b8bd-01a1f834ae63"),
+                     "/variants_of_interest.csv")
+voi_tmp <- file.path(tempdir(), "variants_of_interest.csv")
+voi_ok  <- system(paste("gcloud storage cp", shQuote(voi_bucket), shQuote(voi_tmp)),
+                  ignore.stdout = TRUE, ignore.stderr = TRUE) == 0
+
+variants_of_interest <- if (voi_ok) {
+  read_csv(voi_tmp, show_col_types = FALSE)
+} else if (file.exists("variants_of_interest.csv")) {
   read_csv("variants_of_interest.csv", show_col_types = FALSE)
 } else NULL
+
+voi_source <- if (voi_ok) {
+  "workspace bucket (what the notebooks read)"
+} else if (!is.null(variants_of_interest)) {
+  "local repo copy - the bucket was unreachable"
+} else {
+  "not available"
+}
+
+# An edit committed to the repo but never published is invisible to every
+# notebook, which is exactly how the two copies drifted before. Surface it.
+if (voi_ok && file.exists("variants_of_interest.csv") &&
+    !identical(readLines("variants_of_interest.csv", warn = FALSE),
+               readLines(voi_tmp, warn = FALSE))) {
+  voi_source <- paste(voi_source, "** REPO COPY HAS DRIFTED - publish it, see README **")
+}
 
 inputs <- tibble(
   File = c("mesa_signif_GxMs.csv", "GxM_results.csv", "Y_G.csv", "E_G.csv",
@@ -191,6 +221,8 @@ inputs %>%
   kable(caption = "Result files available to this report") %>%
   kable_styling(full_width = FALSE)
 ```
+
+Variant table read from: **`r voi_source`**
 
 Anchors reported: **`r scope_note`**
 (pre-specified in `anchors.csv`; anchors with `include = FALSE` remain in

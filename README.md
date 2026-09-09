@@ -34,6 +34,35 @@ and can be run at any time. `manuscript.Rmd` is the final synthesis and reads re
 * `04_simulation.ipynb`: Simulation study characterizing the operating characteristics (power and Type I error) of the GxE molecular-mediator screening pipeline across four causal scenarios (downstream signaling, upstream bioaccumulation, reverse causation, and a confounded null). Self-contained: it reads no project data and depends on no other notebook.
 * `manuscript.Rmd`: Renders the tables and figures for the manuscript from the results written by the numbered notebooks. Reads only from `results/`, never refits a model, and skips any section whose input is absent.
 
+# Hand-maintained tables
+
+Three small CSVs are edited by hand rather than produced by a notebook. They are
+versioned here, but two of them are **read from the workspace bucket**, not from this
+repository, and the bucket copy is the one that takes effect:
+
+| File | Read by | Ground truth |
+|---|---|---|
+| `variants_of_interest.csv` | `01b`, `02b`, `03c`, `manuscript.Rmd` | **workspace bucket** |
+| `geno_files_drs.csv` | `01b` | **workspace bucket** |
+| `anchors.csv` | `manuscript.Rmd` only | this repository |
+
+The split exists because of how notebooks reach Terra: only `*.ipynb` files are copied
+into the VM's working directory, so a notebook running there cannot read a CSV that
+lives only in the repo. `anchors.csv` is exempt because nothing but `manuscript.Rmd`
+reads it, and that renders locally, inside this repo.
+
+**After editing either bucket-backed file, publish it** — otherwise the change is
+invisible to every notebook, and the two copies silently diverge:
+
+```
+gcloud storage cp variants_of_interest.csv geno_files_drs.csv \
+  gs://fc-secure-4a392455-5587-4d6f-b8bd-01a1f834ae63/
+```
+
+Run that from this directory on a machine with `gcloud` authenticated; it does not
+involve the Terra notebook-sync path. `manuscript.Rmd` reads the published copy and
+flags it in its output if the repo copy has drifted from it.
+
 # Repository workflow
 
 The source of truth for this project is the GitHub repository [`westerman-lab/gxpa-lcms`](https://github.com/westerman-lab/gxpa-lcms). Notebooks are versioned as `.ipynb`, and cell outputs are stripped automatically on commit by [`nbstripout`](https://github.com/kynan/nbstripout) (declared in `.gitattributes`), so only clean source is tracked. Generated outputs (HTML, figures, `*_cache/`, `*_files/`, data files) are gitignored.
