@@ -1,0 +1,552 @@
+---
+output: html_document
+title: "Real-data analysis: outputs for the GxPA LC-MS manuscript"
+---
+
+```{r setup, include = F}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.path = "output/manuscript/", dpi = 300,
+                      cache.path = "cache/manuscript/")
+suppressMessages(silent <- lapply(
+  c("knitr", "kableExtra", "tidyverse", "cowplot", "patchwork", "ggrepel"),
+  library, character.only = TRUE))
+select <- dplyr::select
+theme_set(theme_bw())
+
+dir.create("output/manuscript", recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r load-results}
+# All model results are written by 02b_analysis.ipynb and copied down from the
+# Terra workspace bucket into results/. Every section below degrades gracefully:
+# if an input has not been copied yet, that section reports it and is skipped
+# rather than failing the render.
+
+# Results may sit inside the repo (results/) or at the project level (../results/,
+# alongside doc/). Use whichever exists.
+results_dir <- c("results", "../results") %>%
+  keep(dir.exists) %>%
+  pluck(1, .default = "results")
+
+read_result <- function(f, dir = results_dir) {
+  path <- file.path(dir, f)
+  if (!file.exists(path)) return(NULL)
+  read_csv(path, show_col_types = FALSE, progress = FALSE) %>%
+    # The notebook writes a literal "β_GxM"/"β_G"/"β_E" column; normalise to ASCII.
+    rename_with(~ gsub("β", "beta", .x))
+}
+
+have <- function(x) !is.null(x) && nrow(x) > 0
+
+signif_gxm <- read_result("mesa_signif_GxMs.csv")   # Significant GxM hits, annotated
+gxm_all    <- read_result("GxM_results.csv")        # Full metabolome-wide screen
+y_g        <- read_result("Y_G.csv")                # Marginal SNP-outcome
+e_g        <- read_result("E_G.csv")                # SNP-exposure (scenario-B diagnostic)
+gxe        <- read_result("GxE.csv")                # The anchoring interactions
+m_e        <- read_result("M_E.csv")                # Metabolite-exposure coupling
+gxc        <- read_result("GxMpGxEpGxC.csv")        # G x covariate sensitivity
+met_info   <- read_result("met_info-mesa.csv")      # Optional: metadata for all metabolites
+
+# met_info-mesa.csv is the raw metadata written by 01a and carries no display
+# label, so build one here rather than depending on the notebook to add it:
+# annotated name where available, else m/z @ RT (Amide-neg has no RT).
+if (have(met_info) && !("met_label" %in% names(met_info))) {
+  met_info <- met_info %>%
+    mutate(met_label = case_when(
+      !is.na(Metabolite) ~ Metabolite,
+      !is.na(RT)         ~ paste0("m/z ", round(MZ, 4), " @ ", round(RT, 2), " min"),
+      TRUE               ~ paste0("m/z ", round(MZ, 4))))
+}
+
+variants_of_interest <- if (file.exists("variants_of_interest.csv")) {
+  read_csv("variants_of_interest.csv", show_col_types = FALSE)
+} else NULL
+
+inputs <- tibble(
+  File = c("mesa_signif_GxMs.csv", "GxM_results.csv", "Y_G.csv", "E_G.csv",
+           "GxE.csv", "M_E.csv", "GxMpGxEpGxC.csv", "met_info-mesa.csv"),
+  Contents = c("Significant GxM hits (annotated)", "Full metabolome-wide screen",
+               "Marginal SNP-outcome", "SNP-exposure", "Anchoring GxE interactions",
+               "Metabolite-exposure coupling", "G x covariate sensitivity",
+               "Metabolite metadata (optional)"),
+  Loaded = c(have(signif_gxm), have(gxm_all), have(y_g), have(e_g),
+             have(gxe), have(m_e), have(gxc), have(met_info)),
+  Rows = c(nrow(signif_gxm) %||% 0, nrow(gxm_all) %||% 0, nrow(y_g) %||% 0,
+           nrow(e_g) %||% 0, nrow(gxe) %||% 0, nrow(m_e) %||% 0,
+           nrow(gxc) %||% 0, nrow(met_info) %||% 0)
+)
+```
+
+```{r params}
+# Effective number of independent metabolites and the resulting screen threshold.
+# Read from the notebook's own analysis_params.csv when available, so the two
+# cannot drift apart; otherwise fall back to the value 02b last reported.
+params <- read_result("analysis_params.csv")
+N_EFF_METABOLITES <- if (have(params)) params$n_eff_metabolites[1] else 68.7
+p_thresh_mwas     <- if (have(params)) params$p_thresh_mwas[1]     else 0.05 / N_EFF_METABOLITES
+threshold_source  <- if (have(params)) "read from analysis_params.csv" else "fallback default"
+
+# Readable labels for outcomes and exposures.
+outcome_labels  <- c(hdl_log = "log(HDL-C)", tg_log = "log(TG)",
+                     fg = "Fasting glucose", hb = "HbA1c")
+exposure_labels <- c(mvpa_wins = "MVPA", bmi = "BMI", sex = "Sex", smoking = "Smoking")
+
+relabel <- function(x, lookup) coalesce(unname(lookup[x]), x)
+
+# Anchor = one (outcome, exposure, SNP) combination taken into the screen.
+# NB: the argument is `dat`, not `df` -- the results tables carry a column named
+# `df` (Satterthwaite degrees of freedom), which would shadow the argument inside
+# mutate()'s data mask and silently break the gene lookup.
+anchor_label <- function(dat) {
+  has_gene <- "gene" %in% names(dat)
+  dat %>%
+    mutate(anchor = paste0(if (has_gene) coalesce(gene, rsid) else rsid,
+                           " (", rsid, ")\n",
+                           relabel(E, exposure_labels), " -> ",
+                           relabel(Y, outcome_labels)))
+}
+```
+
+```{r anchor-scope}
+# ---------------------------------------------------------------------------
+# Pre-specified anchor set.
+#
+# 02b screens a superset of (SNP, outcome, exposure) combinations. The anchors
+# carried into the manuscript are chosen on prior grounds -- a published
+# interaction we are deliberately following up -- not on how they rank in MESA,
+# and they are declared in anchors.csv so the choice lives in one auditable
+# place rather than being implied by a filter somewhere downstream.
+#
+# To change the reported scope, edit anchors.csv: flip `include` to FALSE to
+# park an anchor (its rows stay in results/, they just stop being reported).
+# Dropping the CETP locus to a physical-activity-only paper is one edit there.
+# ---------------------------------------------------------------------------
+
+anchors <- if (file.exists("anchors.csv")) {
+  read_csv("anchors.csv", show_col_types = FALSE) %>% filter(include)
+} else {
+  NULL
+}
+
+if (is.null(anchors)) {
+  warning("anchors.csv not found - reporting every anchor present in the results.")
+  in_scope    <- function(dat, ...) dat
+  scope_note  <- "no anchors.csv found; every screened anchor is reported"
+} else {
+  # Anchor-keyed tables (GxM, GxE, GxCovar) match on all three of G, Y, E.
+  in_scope <- function(dat) {
+    if (is.null(dat) || nrow(dat) == 0) return(dat)
+    keys <- intersect(c("G", "Y", "E"), names(dat))
+    if (length(keys) == 0) return(dat)
+    semi_join(dat, distinct(anchors[keys]), by = keys)
+  }
+  scope_note <- paste(anchors$label, collapse = "; ")
+}
+
+# Marginal tables are keyed by only part of the anchor, so they get their own
+# filters rather than being forced through in_scope().
+keep_pairs <- function(dat, a, b) {
+  if (is.null(dat) || nrow(dat) == 0 || is.null(anchors)) return(dat)
+  semi_join(dat, distinct(anchors[c(a, b)]), by = c(a, b))
+}
+
+gxm_all    <- in_scope(gxm_all)
+gxe        <- in_scope(gxe)
+gxc        <- in_scope(gxc)
+signif_gxm <- in_scope(signif_gxm)      # hit selection is per-row, so filtering
+                                        # and re-selecting give the same rows.
+y_g        <- keep_pairs(y_g, "Y", "G")
+e_g        <- keep_pairs(e_g, "E", "G")
+m_e        <- if (have(signif_gxm) && have(m_e))
+                semi_join(m_e, distinct(select(signif_gxm, M, E)), by = c("M", "E")) else m_e
+```
+
+
+# Input inventory
+
+```{r input-inventory}
+inputs %>%
+  mutate(Loaded = ifelse(Loaded, "yes", "MISSING")) %>%
+  kable(caption = "Result files available to this report") %>%
+  kable_styling(full_width = FALSE)
+```
+
+Anchors reported: **`r scope_note`**
+(pre-specified in `anchors.csv`; anchors with `include = FALSE` remain in
+`results/` but are not reported here).
+
+Screen-wide significance threshold: **p < `r signif(p_thresh_mwas, 3)`**
+(Bonferroni over `r signif(N_EFF_METABOLITES, 4)` effective metabolites;
+`r threshold_source`). Note that this corrects across metabolites within an
+anchor, not across anchors.
+
+# Stage 0: how do the anchoring interactions look in MESA?
+
+The anchors are chosen on prior grounds, so these tables are reported for
+transparency rather than as a gate: they show how strongly each published
+interaction is expressed in MESA under the current model specification, before
+any metabolite is examined. A weak anchor is informative in its own right --
+the simulation predicts that the GxM test is least specific exactly there.
+
+```{r anchor-gxe}
+if (have(gxe)) {
+  gxe_tbl <- gxe %>%
+    filter(!is.na(est)) %>%
+    { if (!is.null(variants_of_interest))
+        left_join(., select(variants_of_interest, G = cpaid, rsid, gene, analysis),
+                  by = "G") else . } %>%
+    mutate(Outcome = relabel(Y, outcome_labels),
+           Exposure = relabel(E, exposure_labels)) %>%
+    arrange(p) %>%
+    select(any_of(c("Outcome", "Exposure", "rsid", "gene", "analysis")),
+           beta_GxE = est, se, p, n) %>%
+    mutate(across(c(beta_GxE, se), ~ signif(.x, 3)), p = signif(p, 3))
+
+  write_csv(gxe_tbl, "output/manuscript/anchor_gxe.csv")
+
+  gxe_tbl %>%
+    kable(caption = "Anchoring GxE interactions in MESA") %>%
+    kable_styling(full_width = FALSE)
+} else cat("GxE.csv not available - skipping.\n")
+```
+
+```{r anchor-marginal}
+if (have(y_g) || have(e_g)) {
+  marg <- bind_rows(
+    if (have(y_g)) mutate(filter(y_g, !is.na(est)), Model = "Y ~ G",
+                          Trait = relabel(Y, outcome_labels)) else NULL,
+    if (have(e_g)) mutate(filter(e_g, !is.na(est)), Model = "E ~ G",
+                          Trait = relabel(E, exposure_labels)) else NULL
+  ) %>%
+    { if (!is.null(variants_of_interest))
+        left_join(., select(variants_of_interest, G = cpaid, rsid, gene), by = "G") else . } %>%
+    arrange(p) %>%
+    select(Model, Trait, any_of(c("rsid", "gene")), beta = est, se, p, n) %>%
+    mutate(across(c(beta, se), ~ signif(.x, 3)), p = signif(p, 3))
+
+  write_csv(marg, "output/manuscript/anchor_marginal.csv")
+
+  marg %>%
+    head(30) %>%
+    kable(caption = paste("Marginal SNP associations (top 30). E ~ G is the",
+                          "diagnostic for an upstream (scenario B) architecture:",
+                          "a strong G -> E effect would suggest the SNP acts on",
+                          "the exposure rather than downstream of it.")) %>%
+    kable_styling(full_width = FALSE)
+} else cat("Y_G.csv / E_G.csv not available - skipping.\n")
+```
+
+# Metabolome-wide interaction screen
+
+```{r mwis-counts}
+if (have(gxm_all)) {
+  gxm_annot <- gxm_all %>%
+    filter(!is.na(est)) %>%
+    { if (have(met_info))
+        left_join(., select(met_info, M = unique_met_id, Metabolite, met_label,
+                            Method, MZ, RT, HMDB_ID),
+                  by = "M") else . } %>%
+    { if (!("met_label" %in% names(.)) && have(signif_gxm))
+        left_join(., distinct(select(signif_gxm, M, met_label)), by = "M") else . } %>%
+    mutate(hit = p < p_thresh_mwas)
+
+  screen_summary <- gxm_annot %>%
+    { if (!is.null(variants_of_interest))
+        left_join(., select(variants_of_interest, G = cpaid, rsid, gene), by = "G") else . } %>%
+    group_by(across(any_of(c("rsid", "gene"))), Y, E) %>%
+    summarise(`Metabolites tested` = n(),
+              `Hits` = sum(hit),
+              `Min p` = signif(min(p, na.rm = TRUE), 3),
+              .groups = "drop") %>%
+    mutate(Outcome = relabel(Y, outcome_labels),
+           Exposure = relabel(E, exposure_labels)) %>%
+    select(any_of(c("rsid", "gene")), Outcome, Exposure,
+           `Metabolites tested`, Hits, `Min p`) %>%
+    arrange(desc(Hits))
+
+  write_csv(screen_summary, "output/manuscript/screen_summary.csv")
+
+  screen_summary %>%
+    kable(caption = "Metabolome-wide screen: hits per anchor") %>%
+    kable_styling(full_width = FALSE)
+} else cat("GxM_results.csv not available - skipping.\n")
+```
+
+```{r mwis-volcano, fig.asp = 0.5}
+if (have(gxm_all)) {
+  volcano_df <- gxm_annot %>%
+    { if (!is.null(variants_of_interest))
+        left_join(., select(variants_of_interest, G = cpaid, rsid, gene), by = "G") else . } %>%
+    anchor_label()
+
+  volcano_plt <- volcano_df %>%
+    ggplot(aes(x = est, y = -log10(p))) +
+    geom_point(aes(color = hit), size = 0.7, alpha = 0.6) +
+    geom_hline(yintercept = -log10(p_thresh_mwas), linetype = "dashed", color = "gray40") +
+    geom_vline(xintercept = 0, color = "gray80") +
+    { if ("met_label" %in% names(volcano_df))
+        geom_text_repel(data = filter(volcano_df, hit), aes(label = met_label),
+                        size = 2.2, min.segment.length = 0, box.padding = 0.6,
+                        point.padding = 0.2, segment.size = 0.3, segment.color = "gray50",
+                        max.overlaps = Inf, seed = 1, direction = "y", hjust = 0) } +
+    scale_y_continuous(expand = expansion(mult = c(0.02, 0.28))) +
+    scale_color_manual(values = c(`FALSE` = "gray70", `TRUE` = "firebrick"),
+                       guide = "none") +
+    facet_wrap(vars(anchor), scales = "free_x") +
+    labs(x = expression("G x M interaction estimate (" * beta[GxM] * ")"),
+         y = expression(-log[10](italic(p))))
+
+  volcano_plt
+} else cat("GxM_results.csv not available - skipping.\n")
+```
+
+```{r mwis-by-method, fig.asp = 0.45}
+if (have(gxm_all) && "Method" %in% names(gxm_annot)) {
+  gxm_annot %>%
+    { if (!is.null(variants_of_interest))
+        left_join(., select(variants_of_interest, G = cpaid, rsid, gene), by = "G") else . } %>%
+    anchor_label() %>%
+    arrange(Method) %>%
+    group_by(anchor) %>%
+    mutate(idx = row_number()) %>%
+    ungroup() %>%
+    ggplot(aes(x = idx, y = -log10(p), color = Method)) +
+    geom_point(size = 0.6, alpha = 0.7) +
+    geom_hline(yintercept = -log10(p_thresh_mwas), linetype = "dashed", color = "gray40") +
+    facet_wrap(vars(anchor)) +
+    labs(x = "Metabolite (ordered by LC-MS method)",
+         y = expression(-log[10](italic(p)))) +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+          panel.grid.major.x = element_blank(), panel.grid.minor.x = element_blank())
+} else cat("Metabolite metadata (Method) not available - skipping per-method plot.\n")
+```
+
+```{r signif-hits-table}
+if (have(signif_gxm)) {
+  hits_tbl <- signif_gxm %>%
+    mutate(Outcome = relabel(Y, outcome_labels),
+           Exposure = relabel(E, exposure_labels)) %>%
+    arrange(p) %>%
+    select(any_of(c("rsid", "gene")), Outcome, Exposure,
+           Metabolite = met_label, any_of(c("HMDB_ID", "Method", "MZ", "RT")),
+           beta_GxM, se, p) %>%
+    mutate(across(any_of(c("MZ")), ~ signif(.x, 6)),
+           across(any_of(c("RT")), ~ signif(.x, 3)),
+           across(c(beta_GxM, se, p), ~ signif(.x, 3)))
+
+  write_csv(hits_tbl, "output/manuscript/table1_gxm_hits.csv")
+
+  hits_tbl %>%
+    kable(caption = "Table 1. Significant gene x metabolite interactions") %>%
+    kable_styling(full_width = FALSE)
+} else cat("mesa_signif_GxMs.csv not available - skipping.\n")
+```
+
+# Directness: how much interaction signal does GxM recover that GxE does not?
+
+The conceptual model says the observed GxE interaction is a *diluted* version of
+the GxM interaction: with E and M standardised and coupled by
+`M = alpha*E + eps`, we expect `beta_GxE ~= alpha * beta_GxM`. Dilution has two
+sources -- imperfect measurement of E, and the structural fact that M has
+determinants other than E -- and both push `alpha` below 1 regardless of how well
+E is measured. The tables below quantify that gap directly in the MESA data.
+
+```{r gxm-vs-gxe}
+if (have(signif_gxm) && have(gxe)) {
+  gxe_key <- gxe %>%
+    filter(!is.na(est)) %>%
+    select(Y, E, G, beta_GxE = est, se_GxE = se, p_GxE = p)
+
+  directness <- signif_gxm %>%
+    inner_join(gxe_key, by = c("Y", "E", "G")) %>%
+    mutate(Outcome = relabel(Y, outcome_labels),
+           Exposure = relabel(E, exposure_labels),
+           ratio_beta = beta_GxM / beta_GxE,
+           gain_nlp = -log10(p) - (-log10(p_GxE))) %>%
+    arrange(p) %>%
+    select(any_of(c("rsid", "gene")), Outcome, Exposure, Metabolite = met_label,
+           beta_GxM, p_GxM = p, beta_GxE, p_GxE,
+           `beta ratio (GxM/GxE)` = ratio_beta,
+           `-log10p gain` = gain_nlp) %>%
+    mutate(across(where(is.numeric), ~ signif(.x, 3)))
+
+  write_csv(directness, "output/manuscript/directness_gxm_vs_gxe.csv")
+
+  directness %>%
+    kable(caption = paste("GxM versus the anchoring GxE. A beta ratio > 1 and a",
+                          "positive -log10p gain indicate the metabolite carries",
+                          "the interaction more directly than the exposure does.")) %>%
+    kable_styling(full_width = FALSE)
+} else cat("Need both mesa_signif_GxMs.csv and GxE.csv - skipping.\n")
+```
+
+```{r dilution-check, fig.asp = 0.5}
+# Quantitative test of the conceptual model: predicted beta_GxE = alpha * beta_GxM,
+# where alpha is the standardised M ~ E coefficient. Deviations are informative --
+# they bound how much of the GxE signal the exposure can carry at all.
+if (have(signif_gxm) && have(gxe) && have(m_e)) {
+  alpha_df <- m_e %>%
+    filter(!is.na(est)) %>%
+    select(M, E, alpha = est, alpha_se = se, alpha_p = p) %>%
+    distinct(M, E, .keep_all = TRUE)  # One alpha per (metabolite, exposure); guards the join below.
+
+  dilution <- signif_gxm %>%
+    inner_join(select(filter(gxe, !is.na(est)), Y, E, G, beta_GxE = est),
+               by = c("Y", "E", "G")) %>%
+    inner_join(alpha_df, by = c("M", "E")) %>%
+    mutate(predicted_GxE = alpha * beta_GxM,
+           Outcome = relabel(Y, outcome_labels),
+           Exposure = relabel(E, exposure_labels))
+
+  if (nrow(dilution) > 0) {
+    dil_tbl <- dilution %>%
+      arrange(p) %>%
+      select(any_of(c("rsid", "gene")), Outcome, Exposure, Metabolite = met_label,
+             `alpha (M~E)` = alpha, beta_GxM, `predicted beta_GxE` = predicted_GxE,
+             `observed beta_GxE` = beta_GxE) %>%
+      mutate(across(where(is.numeric), ~ signif(.x, 3)))
+
+    write_csv(dil_tbl, "output/manuscript/dilution_check.csv")
+
+    print(kable_styling(kable(
+      dil_tbl,
+      caption = paste("Dilution check: is the observed GxE consistent with",
+                      "alpha * beta_GxM? alpha is the standardised metabolite-exposure",
+                      "coupling, so a small alpha implies the exposure can only ever",
+                      "carry a fraction of the interaction."))))
+
+    dilution %>%
+      ggplot(aes(x = predicted_GxE, y = beta_GxE)) +
+      geom_abline(slope = 1, intercept = 0, color = "gray60", linetype = "dashed") +
+      geom_hline(yintercept = 0, color = "gray85") +
+      geom_vline(xintercept = 0, color = "gray85") +
+      geom_point(aes(color = Exposure), size = 2) +
+      geom_text_repel(aes(label = met_label), size = 2.5, max.overlaps = 15) +
+      labs(x = expression("Predicted " * beta[GxE] * " ( = " * alpha %*% beta[GxM] * " )"),
+           y = expression("Observed " * beta[GxE]))
+  } else cat("No overlapping (M, E) rows between the hits and M_E.csv - skipping.\n")
+} else cat("Need mesa_signif_GxMs.csv, GxE.csv and M_E.csv - skipping.\n")
+```
+
+# Are the hits plausible mediators?
+
+A metabolite that mediates the exposure's contribution should itself be
+associated with the exposure. Metabolites with a strong GxM but no M~E
+association are candidates for the reverse-causation or confounding
+architectures rather than true mediation.
+
+```{r m-e-table}
+if (have(m_e)) {
+  me_tbl <- m_e %>%
+    filter(!is.na(est)) %>%
+    { if (have(signif_gxm))
+        left_join(., distinct(select(signif_gxm, M, met_label)), by = "M") else . } %>%
+    { if (have(met_info) && !("met_label" %in% names(.)))
+        left_join(., select(met_info, M = unique_met_id, met_label), by = "M") else . } %>%
+    mutate(Exposure = relabel(E, exposure_labels)) %>%
+    arrange(p) %>%
+    select(Metabolite = any_of(c("met_label", "M")), Exposure,
+           beta_E = est, se, p, n) %>%
+    mutate(across(c(beta_E, se), ~ signif(.x, 3)), p = signif(p, 3))
+
+  write_csv(me_tbl, "output/manuscript/metabolite_exposure.csv")
+
+  me_tbl %>%
+    kable(caption = "Metabolite-exposure associations for the significant hits") %>%
+    kable_styling(full_width = FALSE)
+} else cat("M_E.csv not available - skipping.\n")
+```
+
+# Redundancy among the hits
+
+Significant metabolites are often strongly correlated with one another, so a raw
+count of hits overstates the number of independent signals. This section
+collapses them where the QC'd metabolite matrix is available locally.
+
+```{r hit-correlations, fig.asp = 0.8}
+met_matrix_path <- "data/derived/metabolomics/QCd/merged_QCd-mesa.csv"
+
+if (have(signif_gxm) && file.exists(met_matrix_path)) {
+  hit_ids <- unique(signif_gxm$M)
+  met_mat <- read_csv(met_matrix_path, show_col_types = FALSE, progress = FALSE) %>%
+    select(any_of(hit_ids))
+
+  if (ncol(met_mat) > 1) {
+    cmat <- cor(met_mat, use = "pairwise.complete.obs")
+    lab <- signif_gxm$met_label[match(colnames(cmat), signif_gxm$M)]
+    dimnames(cmat) <- list(lab, lab)
+
+    clust <- hclust(as.dist(1 - abs(cmat)))
+    n_indep <- length(unique(cutree(clust, h = 1 - 0.8)))  # Merge at |r| > 0.8
+
+    cat("Independent signal clusters at |r| < 0.8:", n_indep,
+        "from", ncol(cmat), "significant metabolites\n\n")
+
+    as_tibble(cmat, rownames = "met1") %>%
+      pivot_longer(-met1, names_to = "met2", values_to = "r") %>%
+      mutate(across(c(met1, met2), ~ factor(.x, levels = clust$labels[clust$order]))) %>%
+      ggplot(aes(x = met1, y = met2, fill = r)) +
+      geom_tile() +
+      scale_fill_gradient2(name = "Pearson r", limits = c(-1, 1)) +
+      labs(x = "", y = "") +
+      theme(axis.text.x = element_text(angle = 40, hjust = 0.9))
+  } else cat("Fewer than two significant metabolites - nothing to cluster.\n")
+} else {
+  cat("Metabolite matrix not available locally (", met_matrix_path, ").\n",
+      "Copy it down, or run this section on Terra, to collapse correlated hits.\n", sep = "")
+}
+```
+
+# Sensitivity: G x covariate adjustment
+
+```{r gxcovars}
+if (have(gxc)) {
+  gxc_tbl <- gxc %>%
+    filter(!is.na(est)) %>%
+    { if (have(signif_gxm))
+        left_join(., distinct(select(signif_gxm, M, met_label)), by = "M") else . } %>%
+    { if (!is.null(variants_of_interest))
+        left_join(., select(variants_of_interest, G = cpaid, rsid, gene), by = "G") else . } %>%
+    mutate(Outcome = relabel(Y, outcome_labels)) %>%
+    arrange(p) %>%
+    select(any_of(c("rsid", "gene")), Outcome,
+           Metabolite = any_of(c("met_label", "M")),
+           beta_GxM_adj = est, se, p) %>%
+    mutate(across(where(is.numeric), ~ signif(.x, 3)))
+
+  write_csv(gxc_tbl, "output/manuscript/sensitivity_gxcovars.csv")
+
+  gxc_tbl %>%
+    kable(caption = paste("GxM estimates with additional G x covariate adjustment.",
+                          "Estimates that attenuate substantially relative to Table 1",
+                          "suggest the interaction is confounded rather than causal.")) %>%
+    kable_styling(full_width = FALSE)
+} else cat("GxMpGxEpGxC.csv not available - skipping.\n")
+```
+
+```{r attenuation-comparison}
+if (have(gxc) && have(signif_gxm)) {
+  atten <- signif_gxm %>%
+    select(Y, E, G, M, met_label, beta_primary = beta_GxM, p_primary = p) %>%
+    inner_join(select(filter(gxc, !is.na(est)), Y, E, G, M,
+                      beta_adj = est, p_adj = p),
+               by = c("Y", "E", "G", "M")) %>%
+    mutate(`% attenuation` = 100 * (1 - beta_adj / beta_primary)) %>%
+    arrange(p_primary) %>%
+    select(Metabolite = met_label, beta_primary, beta_adj,
+           `% attenuation`, p_primary, p_adj) %>%
+    mutate(across(where(is.numeric), ~ signif(.x, 3)))
+
+  write_csv(atten, "output/manuscript/sensitivity_attenuation.csv")
+
+  atten %>%
+    kable(caption = "Primary versus G x covariate-adjusted GxM estimates") %>%
+    kable_styling(full_width = FALSE)
+}
+```
+
+# Session
+
+```{r session-info}
+sessionInfo()
+```
