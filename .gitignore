@@ -12,6 +12,10 @@ scratch/
 *.pdf
 *.html
 *.csv
+# ...except the small hand-maintained source-of-truth tables:
+!anchors.csv
+!variants_of_interest.csv
+!geno_files_drs.csv
 *.tsv
 *.txt
 *.bgen

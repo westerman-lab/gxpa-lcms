@@ -1,0 +1,4 @@
+G,Y,E,rsid,gene,label,include,provenance
+chr2_121657822_C_T,hdl_log,mvpa_wins,rs2862183,CLASP1,CLASP1 x MVPA -> HDL-C,TRUE,"Westerman et al. 2025 Genet. Epidemiol.; continues the published GxPA-HDL-C arc"
+chr16_56960982_G_A,hdl_log,bmi,rs4783961,CETP,CETP x BMI -> HDL-C,TRUE,"Westerman et al. 2022 Nat. Commun. vQTL; CETP promoter-region variant, strong prior for HDL-C biology"
+chr16_56960982_G_A,tg_log,bmi,rs4783961,CETP,CETP x BMI -> TG,FALSE,"Screened but not carried forward: outcome outside the HDL-C arc"
