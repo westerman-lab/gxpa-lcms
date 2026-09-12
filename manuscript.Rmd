@@ -430,14 +430,28 @@ if (have(qc$variable_distributions)) {
 }
 ```
 
+Lipid-lowering medication is reported here for context, **not** as an adjustment,
+and HDL-C is deliberately left uncorrected. The convention (GLGC and essentially
+every large lipid GWAS since) corrects TC and LDL-C for treatment and leaves HDL-C
+and TG alone: the statin effect on LDL-C is large and consistent enough to justify a
+single divisor, while its effect on HDL-C is a few percent and varies by drug and
+dose, so a correction factor would add more error than it removes. Adjusting for
+medication as a *covariate* would be worse still -- treatment is prescribed in
+response to lipid levels, so it is a descendant of the outcome, and conditioning on
+it risks collider bias in exactly the E -> Y slope the interaction models are about.
+
+The table is useful in two other ways: as the denominator for a sensitivity analysis
+refitting the hits with treated participants excluded, and as a flag on the
+metabolite side, where statins do have a detectable signature and a GxM hit on a
+statin-responsive feature would be worth a second look.
+
 ```{r qc-lipid-meds}
 if (have(qc$lipid_medication)) {
   qc$lipid_medication %>%
     mutate(`%` = signif(100 * frac, 3)) %>%
     select(Variable = variable, Value = value, Participants = n_participants, `%`) %>%
-    kable(caption = paste("Lipid-lowering medication. HDL-C is the primary outcome, so",
-                          "treatment prevalence bounds how much of its variance is",
-                          "pharmacological.")) %>%
+    kable(caption = paste("Lipid-lowering medication prevalence. Reported for context;",
+                          "no lipid trait in this pipeline is medication-corrected.")) %>%
     kable_styling(full_width = FALSE)
 } else {
   cat("No lipid-medication summary in results/qc/. 01c writes an empty table when the",
