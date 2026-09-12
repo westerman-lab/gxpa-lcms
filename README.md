@@ -34,6 +34,32 @@ and can be run at any time. `manuscript.Rmd` is the final synthesis and reads re
 * `04_simulation.ipynb`: Simulation study characterizing the operating characteristics (power and Type I error) of the GxE molecular-mediator screening pipeline across four causal scenarios (downstream signaling, upstream bioaccumulation, reverse causation, and a confounded null). Self-contained: it reads no project data and depends on no other notebook.
 * `manuscript.Rmd`: Renders the tables and figures for the manuscript from the results written by the numbered notebooks. Reads only from `results/`, never refits a model, and skips any section whose input is absent.
 
+# Upstream QC artifacts (`results/qc/`)
+
+`manuscript.Rmd` reads `results/` and nothing else. That is deliberate: `analysis_df-mesa.csv`
+and the metabolite intensity matrices are individual-level TOPMed data and stay on Terra, which
+is why the report's redundancy section goes blank on a local knit. So every upstream QC decision
+that has to be auditable in the report is written out as a small summary table into `results/qc/`,
+published to the workspace bucket by the notebook that makes it, and rendered by the report's
+**Upstream QC** section.
+
+| Written by | Files | What it settles |
+|---|---|---|
+| `01a` | `metabolite_qc_steps`, `metabolite_distributions`, `metabolite_qc_quantiles` | Features and samples surviving each QC step, missingness, and the pooled-QC CV |
+| `01b` | `genotype_qc` | Call rate and which allele each dosage counts |
+| `01c` | `sample_flow`, `metabolomics_lane_coverage`, `imputation_ledger`, `variable_distributions`, `lipid_medication`, `icc`, `metabolite_icc`, `metabolite_icc_summary`, `genotype_by_race` | The Methods n's, what was imputed, exposure/outcome distributions by exam, within-person ICCs, allele frequency by self-identified race |
+| `02a` | `table_s1_characteristics`, `analysis_n_by_exam`, `covariate_ladder`, `covariate_variance_explained`, `mpc_covariate_pvalues` | Table S1, and the evidence for the adjustment set |
+| `02b` | `m_eff_estimators`, `metabolite_eigenvalues` | The effective number of tests, and how much the screen threshold depends on which estimator is used |
+
+To refresh them locally after a re-run on Terra:
+
+```
+gcloud storage cp 'gs://fc-secure-4a392455-5587-4d6f-b8bd-01a1f834ae63/results/qc/*' ../results/qc/
+```
+
+Sections whose input is missing print what they are waiting for rather than failing the render,
+so a partially copied `results/qc/` still knits.
+
 # Hand-maintained tables
 
 Three small CSVs are edited by hand rather than produced by a notebook. They are

@@ -128,6 +128,56 @@ inputs <- bind_rows(inputs, tibble(
 ))
 ```
 
+```{r load-qc}
+# QC summaries written into results/qc/ by 01a, 01b, 01c, 02a and 02b.
+#
+# They exist because this report cannot read what they describe: the metabolite
+# matrices and analysis_df-mesa.csv are individual-level TOPMed data and stay on
+# Terra -- which is exactly why the redundancy section further down goes blank on a
+# local knit. Every upstream decision that has to be auditable here therefore
+# travels as counts, quantiles and per-feature statistics instead.
+qc_files <- c(
+  "sample_flow-mesa.csv"                  = "Sample flow, MESA exams to analysis rows",
+  "metabolomics_lane_coverage-mesa.csv"   = "Coverage by LC-MS method",
+  "imputation_ledger-mesa.csv"            = "Imputation counts, per variable per exam",
+  "variable_distributions-mesa.csv"       = "Exposure/outcome distributions by exam",
+  "lipid_medication-mesa.csv"             = "Lipid-lowering medication",
+  "icc-mesa.csv"                          = "Within-person ICC, phenotypes",
+  "metabolite_icc-mesa.csv"               = "Within-person ICC, per metabolite",
+  "metabolite_icc_summary-mesa.csv"       = "Within-person ICC, per LC-MS method",
+  "genotype_by_race-mesa.csv"             = "Allele frequency by self-identified race",
+  "genotype_qc-mesa.csv"                  = "Call rate and dosage polarity",
+  "table_s1_characteristics-mesa.csv"     = "Table S1, participant characteristics",
+  "analysis_n_by_exam-mesa.csv"           = "Analysis n by exam",
+  "covariate_ladder-mesa.csv"             = "Covariate ladder estimates",
+  "covariate_variance_explained-mesa.csv" = "Variance in Y explained by each covariate set",
+  "mpc_covariate_pvalues-mesa.csv"        = "Metabolite PC ~ covariate associations",
+  "metabolite_qc_steps-mesa.csv"          = "Features and samples surviving each QC step",
+  "metabolite_distributions-mesa.csv"     = "Missingness and QC-pool CV, binned",
+  "metabolite_qc_quantiles-mesa.csv"      = "Missingness and QC-pool CV, quantiles",
+  "m_eff_estimators-mesa.csv"             = "Effective number of tests, several estimators",
+  "metabolite_eigenvalues-mesa.csv"       = "Metabolite eigenvalue spectrum")
+
+qc <- list()
+# NB single brackets and list(): `qc[[n]] <- NULL` would DELETE the element rather
+# than record the absent file, and the inventory below would then be one row short
+# of the files it claims to cover.
+for (f in names(qc_files))
+  qc[sub("-mesa\\.csv$|\\.csv$", "", f)] <- list(read_result(file.path("qc", f)))
+
+inputs <- bind_rows(inputs, tibble(
+  File     = file.path("qc", names(qc_files)),
+  Contents = unname(qc_files),
+  Loaded   = map_lgl(qc, have),
+  Rows     = map_int(qc, ~ nrow(.x) %||% 0L)))
+
+# One place to say "this section's input has not been copied down yet", so a
+# partially populated results/qc/ reads as a gap rather than as a silence.
+skip_note <- function(...) cat("Not available (", paste(c(...), collapse = ", "),
+                              ") - skipping. Re-run the notebook that writes it, then ",
+                              "copy results/qc/ down from the workspace bucket.\n", sep = "")
+```
+
 ```{r params}
 # Effective number of independent metabolites and the resulting screen threshold.
 # Read from the notebook's own analysis_params.csv when available, so the two
@@ -143,6 +193,27 @@ outcome_labels  <- c(hdl_log = "log(HDL-C)", tg_log = "log(TG)",
 exposure_labels <- c(mvpa_wins = "MVPA", bmi = "BMI", sex = "Sex", smoking = "Smoking")
 
 relabel <- function(x, lookup) coalesce(unname(lookup[x]), x)
+
+# Display names for the QC tables. The raw name is the auditable key, so it stays
+# in the exported CSVs; only what a reader sees is relabelled.
+qc_var_labels <- c(
+  age = "Age (years)", bmi = "BMI (kg/m2)", hdl = "HDL-C (mg/dL)",
+  hdl_log = "log(HDL-C)", tg = "Triglycerides (mg/dL)", tg_log = "log(TG)",
+  fg = "Fasting glucose (mg/dL)", hb = "HbA1c (%)",
+  mvpa = "MVPA (MET-min/week)", mvpa_wins = "MVPA, winsorized",
+  mvpa_log = "log(MVPA + 1)", mvpa_trunc = "MVPA, truncated",
+  pa = "Total PA", mod_pa = "Moderate PA", vig_pa = "Vigorous PA",
+  ahei_score = "AHEI-2010 score", dash_score = "DASH score",
+  ses_score = "Neighbourhood SES score", drinks_per_week = "Alcohol (drinks/week)",
+  sex = "Sex", race = "Race/ethnicity (self-identified)", smoking = "Smoking",
+  site = "Study site", income = "Income", season = "Season", month = "Month",
+  insulin = "Insulin")
+
+qc_label <- function(x) relabel(x, qc_var_labels)
+
+qc_quantity_labels <- c(feature_missingness = "Missingness per feature",
+                        sample_missingness  = "Missingness per sample",
+                        qc_pool_cv          = "QC-pool CV")
 
 # Anchor = one (outcome, exposure, SNP) combination taken into the screen.
 # NB: the argument is `dat`, not `df` -- the results tables carry a column named
@@ -232,6 +303,470 @@ Screen-wide significance threshold: **p < `r signif(p_thresh_mwas, 3)`**
 (Bonferroni over `r signif(N_EFF_METABOLITES, 4)` effective metabolites;
 `r threshold_source`). Note that this corrects across metabolites within an
 anchor, not across anchors.
+
+# Upstream QC
+
+Everything in this section is rendered from `results/qc/`, written by the
+preprocessing notebooks. Nothing here is recomputed, and no individual-level data
+is read -- the point is that the decisions made before any model was fitted are
+visible in the same document as the models, rather than only in the notebook that
+made them.
+
+## Sample construction
+
+```{r qc-sample-flow}
+if (have(qc$sample_flow)) {
+  flow_tbl <- qc$sample_flow %>%
+    filter(exam == "all") %>%
+    arrange(step) %>%
+    select(Step = step, Stage = stage, Rows = n_rows, Participants = n_individuals,
+           `Rows lost` = rows_dropped, `Participants lost` = individuals_dropped,
+           Reason = reason)
+
+  write_csv(flow_tbl, "output/manuscript/qc_sample_flow.csv")
+
+  flow_tbl %>%
+    kable(caption = paste("Sample flow. Filters are cumulative and in the order the",
+                          "analysis applies them; a row is one participant-exam",
+                          "observation. The last row is the n the primary model sees.")) %>%
+    kable_styling(full_width = FALSE)
+} else skip_note("qc/sample_flow-mesa.csv")
+```
+
+```{r qc-sample-flow-by-exam}
+if (have(qc$sample_flow)) {
+  qc$sample_flow %>%
+    filter(exam != "all") %>%
+    arrange(step) %>%
+    select(Stage = stage, exam, n_rows) %>%
+    pivot_wider(names_from = exam, names_prefix = "Exam ", values_from = n_rows) %>%
+    kable(caption = paste("Sample flow by exam. Exam 4 carries no physical-activity",
+                          "questionnaire, and metabolomics was run on a subset of exams,",
+                          "so the losses are not spread evenly.")) %>%
+    kable_styling(full_width = FALSE)
+}
+```
+
+```{r qc-lane-coverage}
+if (have(qc$metabolomics_lane_coverage)) {
+  qc$metabolomics_lane_coverage %>%
+    filter(exam == "all") %>%
+    select(`LC-MS method` = lane, Features = n_features,
+           Observations = n_rows, Participants = n_individuals) %>%
+    kable(caption = paste("Coverage by LC-MS method. A sample can pass QC on one",
+                          "method and fail on another, so the n behind a given",
+                          "metabolite depends on which method it came from.")) %>%
+    kable_styling(full_width = FALSE)
+} else skip_note("qc/metabolomics_lane_coverage-mesa.csv")
+```
+
+## Imputation
+
+```{r qc-imputation}
+if (have(qc$imputation_ledger)) {
+  imp_tbl <- qc$imputation_ledger %>%
+    filter(exam == "all", n_missing_before > 0) %>%
+    arrange(desc(n_missing_before)) %>%
+    select(Variable = variable, Imputation = imputation, Rows = n_rows,
+           Missing = n_missing_before, `% missing` = frac_missing_before,
+           Imputed = n_imputed, `Still missing` = n_still_missing) %>%
+    mutate(`% missing` = signif(100 * `% missing`, 3))
+
+  write_csv(imp_tbl, "output/manuscript/qc_imputation_ledger.csv")
+
+  imp_tbl %>%
+    kable(caption = paste("Imputation ledger, pooled over exams. Counts come from the",
+                          "`__imp` flags 01c sets before any filling, so they record what",
+                          "was actually missing. Every imputed value is one the models",
+                          "treat as observed.")) %>%
+    kable_styling(full_width = FALSE)
+} else skip_note("qc/imputation_ledger-mesa.csv")
+```
+
+```{r qc-imputation-by-exam, fig.asp = 0.5}
+if (have(qc$imputation_ledger)) {
+  qc$imputation_ledger %>%
+    filter(exam != "all") %>%
+    ggplot(aes(x = exam, y = reorder(qc_label(variable), n_missing_before),
+               fill = 100 * frac_missing_before)) +
+    geom_tile() +
+    scale_fill_viridis_c(name = "% missing\nbefore imputation", option = "magma",
+                         direction = -1) +
+    labs(x = "MESA exam", y = NULL)
+}
+```
+
+## Exposure, outcome and covariate distributions
+
+```{r qc-mvpa-transforms}
+if (have(qc$variable_distributions)) {
+  qc$variable_distributions %>%
+    filter(grepl("^mvpa", variable)) %>%
+    mutate(variable = qc_label(variable)) %>%
+    select(Variable = variable, Exam = exam, n, `% zero` = n_zero, Mean = mean,
+           SD = sd, Min = min, P25 = p25, Median = median, P75 = p75, Max = max) %>%
+    mutate(`% zero` = signif(100 * `% zero` / n, 3),
+           across(c(Mean, SD, Min, P25, Median, P75, Max), ~ signif(.x, 3))) %>%
+    kable(caption = paste("MVPA under each transformation 02a compared. `mvpa_wins` is",
+                          "the one the models use: winsorized at the 90th percentile,",
+                          "which is what moves the maximum.")) %>%
+    kable_styling(full_width = FALSE)
+} else skip_note("qc/variable_distributions-mesa.csv")
+```
+
+```{r qc-distributions-by-exam, fig.asp = 0.55}
+if (have(qc$variable_distributions)) {
+  qc$variable_distributions %>%
+    filter(exam != "all",
+           variable %in% c("hdl", "hdl_log", "tg", "bmi", "age", "mvpa", "mvpa_wins", "fg")) %>%
+    mutate(exam = factor(exam), variable = qc_label(variable)) %>%
+    ggplot(aes(x = exam, y = median)) +
+    geom_pointrange(aes(ymin = p25, ymax = p75), size = 0.3) +
+    geom_linerange(aes(ymin = p05, ymax = p95), alpha = 0.35) +
+    facet_wrap(vars(variable), scales = "free_y") +
+    labs(x = "MESA exam", y = "Median (P25-P75, P05-P95)",
+         caption = paste("A step in HDL across exams would be assay or secular drift",
+                         "rather than biology; MVPA is absent at exam 4."))
+}
+```
+
+```{r qc-lipid-meds}
+if (have(qc$lipid_medication)) {
+  qc$lipid_medication %>%
+    mutate(`%` = signif(100 * frac, 3)) %>%
+    select(Variable = variable, Value = value, Participants = n_participants, `%`) %>%
+    kable(caption = paste("Lipid-lowering medication. HDL-C is the primary outcome, so",
+                          "treatment prevalence bounds how much of its variance is",
+                          "pharmacological.")) %>%
+    kable_styling(full_width = FALSE)
+} else {
+  cat("No lipid-medication summary in results/qc/. 01c writes an empty table when the",
+      "PIC-SURE pull in 00 returned no such column - add one there if the report",
+      "should carry this.\n")
+}
+```
+
+## Within-person reliability (ICC)
+
+The simulation assumes ICC = 0.5 for both the exposure and the mediator. These are
+the same quantity measured in MESA, which is what connects the two halves of the
+paper: if the real ICCs sit well below the assumed value, the simulation's power
+curves are optimistic for this dataset.
+
+Read them as a **lower bound** on reliability. The exams are 5-10 years apart, so
+the within-person term mixes measurement error with genuine change, and anything
+that really moves over a decade -- MVPA above all -- is penalised for moving.
+
+```{r qc-icc, fig.asp = 0.5}
+if (have(qc$icc) || have(qc$metabolite_icc_summary)) {
+  # One frame for both halves of the panel: phenotypes are single estimates,
+  # metabolites are a distribution over features, and they share the y axis.
+  icc_panel <- bind_rows(
+    if (have(qc$icc))
+      qc$icc %>% arrange(desc(icc)) %>%
+        transmute(label = qc_label(variable), kind = "Phenotype", point = icc) else NULL,
+    if (have(qc$metabolite_icc_summary))
+      qc$metabolite_icc_summary %>%
+        transmute(label = gsub("_", "-", lane), kind = "Metabolites (per feature)",
+                  p05, p25, median, p75, p95) else NULL) %>%
+    mutate(label = fct_inorder(label),
+           kind  = factor(kind, levels = c("Phenotype", "Metabolites (per feature)")))
+
+  ggplot(icc_panel, aes(x = label)) +
+    geom_hline(yintercept = 0.5, linetype = "dashed", color = "firebrick") +
+    { if ("median" %in% names(icc_panel))
+        geom_boxplot(aes(ymin = p05, lower = p25, middle = median, upper = p75,
+                         ymax = p95),
+                     stat = "identity", width = 0.55, fill = "grey85", na.rm = TRUE) } +
+    { if ("point" %in% names(icc_panel))
+        geom_point(aes(y = point), size = 2, na.rm = TRUE) } +
+    facet_grid(cols = vars(kind), scales = "free_x", space = "free_x") +
+    coord_cartesian(ylim = c(0, 1)) +
+    labs(x = NULL, y = "ICC across exams",
+         caption = paste("Dashed line: the ICC = 0.5 the simulation assumes.",
+                         "Boxes are the P25-P75 of the per-feature ICCs, whiskers P05-P95.")) +
+    theme(axis.text.x = element_text(angle = 35, hjust = 0.9))
+} else skip_note("qc/icc-mesa.csv", "qc/metabolite_icc_summary-mesa.csv")
+```
+
+```{r qc-icc-table}
+if (have(qc$icc)) {
+  icc_tbl <- qc$icc %>%
+    arrange(desc(icc)) %>%
+    mutate(variable = qc_label(variable)) %>%
+    select(Variable = variable, Participants = n_individuals,
+           Observations = n_observations, `Between-person var` = var_between,
+           `Within-person var` = var_within, ICC = icc) %>%
+    mutate(across(where(is.numeric) & !c(Participants, Observations), ~ signif(.x, 3)))
+
+  write_csv(icc_tbl, "output/manuscript/qc_icc.csv")
+
+  icc_tbl %>%
+    kable(caption = paste("Within-person ICC(1) across exams, among participants with",
+                          "at least two measured values. Carried-forward values are",
+                          "excluded: they are copies of the previous exam's and would",
+                          "drive the ICC towards 1.")) %>%
+    kable_styling(full_width = FALSE)
+}
+```
+
+```{r qc-icc-hits}
+# The hits' own reliability is the part of this that bears on the results: a hit on
+# a feature with near-zero ICC is a hit on something the assay barely reproduces.
+if (have(qc$metabolite_icc) && have(signif_gxm)) {
+  hit_icc <- signif_gxm %>%
+    select(M, met_label) %>%
+    distinct() %>%
+    inner_join(select(qc$metabolite_icc, M = feature, icc, n_individuals), by = "M")
+
+  if (nrow(hit_icc)) {
+    hit_icc %>%
+      arrange(desc(icc)) %>%
+      select(Metabolite = met_label, Participants = n_individuals, ICC = icc) %>%
+      mutate(ICC = signif(ICC, 3)) %>%
+      kable(caption = "Within-person ICC of the significant metabolites") %>%
+      kable_styling(full_width = FALSE)
+  } else cat("No overlap between the hits and the metabolites with repeated measures.\n")
+}
+```
+
+## Covariate justification
+
+```{r qc-covariate-ladder, fig.asp = 0.5}
+if (have(qc$covariate_ladder)) {
+  qc$covariate_ladder %>%
+    filter(outcome == "hdl_log", !grepl("^chr", variable)) %>%
+    mutate(covar_set = fct_inorder(covar_set), variable = qc_label(variable)) %>%
+    ggplot(aes(x = covar_set, y = estimate, color = covar_set)) +
+    geom_hline(yintercept = 0, color = "gray70") +
+    geom_pointrange(aes(ymin = l95, ymax = u95), size = 0.3) +
+    facet_wrap(vars(variable), scales = "free_y") +
+    scale_x_discrete(labels = NULL, breaks = NULL) +
+    labs(x = NULL, y = "Standardised estimate",
+         color = "Covariate set",
+         caption = "Rungs are cumulative; the last is the set 02b fits.")
+} else skip_note("qc/covariate_ladder-mesa.csv")
+```
+
+```{r qc-variance-explained}
+if (have(qc$covariate_variance_explained)) {
+  ve_tbl <- qc$covariate_variance_explained %>%
+    mutate(outcome = qc_label(outcome),
+           across(c(r2, adj_r2, delta_adj_r2), ~ signif(.x, 3))) %>%
+    select(Outcome = outcome, `Covariate set` = covar_set, n, Terms = n_terms,
+           `R2` = r2, `Adj. R2` = adj_r2, `Delta adj. R2` = delta_adj_r2)
+
+  write_csv(ve_tbl, "output/manuscript/qc_covariate_variance_explained.csv")
+
+  ve_tbl %>%
+    kable(caption = paste("Variance explained by each covariate set. All sets are fitted",
+                          "on the same complete-case rows, so the rungs are comparable;",
+                          "the delta column is the gain from adding that rung.")) %>%
+    kable_styling(full_width = FALSE)
+} else skip_note("qc/covariate_variance_explained-mesa.csv")
+```
+
+Each cell below is one `mPC ~ covariate` linear model. Only exam-1 samples with
+data on all four LC-MS methods contribute to the metabolite PCs, so this is a
+statement about that subset rather than about the whole analysis sample.
+
+```{r qc-mpc-heatmap, fig.asp = 0.6}
+if (have(qc$mpc_covariate_pvalues)) {
+  qc$mpc_covariate_pvalues %>%
+    mutate(mPC = factor(mPC, levels = paste0("mPC", 1:100)),
+           nlp = pmin(-log10(p), 10)) %>%
+    ggplot(aes(x = mPC, y = fct_rev(fct_inorder(covariate)), fill = nlp)) +
+    geom_tile() +
+    geom_text(data = ~ filter(.x, p < 0.05), label = "*", color = "white", size = 2.5,
+              vjust = 0.75) +
+    scale_fill_gradient(name = expression(-log[10](italic(p))),
+                        low = "black", high = "steelblue", limits = c(0, 10)) +
+    labs(x = NULL, y = NULL, caption = "* marks p < 0.05. Shading capped at 10.") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 0.9))
+} else skip_note("qc/mpc_covariate_pvalues-mesa.csv")
+```
+
+## Metabolite QC
+
+```{r qc-met-steps}
+if (have(qc$metabolite_qc_steps)) {
+  steps_tbl <- qc$metabolite_qc_steps %>%
+    # Step index and label are separate columns: a label starting "1." is read as
+    # an ordered-list marker inside a table cell and swallowed by pandoc.
+    { if ("step_label" %in% names(.)) . else mutate(., step_label = as.character(step)) } %>%
+    select(Method = method_label, Step = step, Stage = step_label,
+           Features = n_features, Samples = n_samples,
+           `Features dropped` = features_dropped, `Samples dropped` = samples_dropped)
+
+  write_csv(steps_tbl, "output/manuscript/qc_metabolite_steps.csv")
+
+  steps_tbl %>%
+    kable(caption = paste("Features and samples surviving each 01a QC step. The last",
+                          "row is the merged matrix: a sample profiled by only some",
+                          "methods still contributes, which is why it has more samples",
+                          "than any single method.")) %>%
+    kable_styling(full_width = FALSE)
+} else skip_note("qc/metabolite_qc_steps-mesa.csv")
+```
+
+```{r qc-met-distributions, fig.asp = 0.4}
+if (have(qc$metabolite_distributions)) {
+  qc$metabolite_distributions %>%
+    # The three quantities use different breaks, so the bins are ordered by their
+    # lower edge rather than by order of appearance in the file.
+    mutate(quantity = factor(recode(quantity, !!!qc_quantity_labels),
+                             levels = unname(qc_quantity_labels)),
+           bin = fct_reorder(bin, bin_lower)) %>%
+    ggplot(aes(x = bin, y = n, fill = method_label)) +
+    geom_col(position = "dodge") +
+    facet_wrap(vars(quantity), scales = "free") +
+    labs(x = NULL, y = "Count", fill = "Method") +
+    theme(axis.text.x = element_text(angle = 40, hjust = 0.9))
+} else skip_note("qc/metabolite_distributions-mesa.csv")
+```
+
+```{r qc-met-quantiles}
+if (have(qc$metabolite_qc_quantiles)) {
+  qc$metabolite_qc_quantiles %>%
+    mutate(quantity = recode(quantity, !!!qc_quantity_labels),
+           across(c(mean, p05, p25, median, p75, p95), ~ signif(.x, 3))) %>%
+    select(Method = method_label, Quantity = quantity, n, Mean = mean,
+           P05 = p05, P25 = p25, Median = median, P75 = p75, P95 = p95,
+           any_of(c(`QC-pool samples` = "n_qc_pool_samples"))) %>%
+    kable(caption = paste("Missingness and pooled-QC CV. The CV is taken on the raw",
+                          "intensity scale before the log2, over the pooled QC samples",
+                          "01a drops, so it measures analytical reproducibility rather",
+                          "than biological spread.")) %>%
+    kable_styling(full_width = FALSE)
+}
+```
+
+### The screen threshold
+
+```{r qc-meff}
+if (have(qc$m_eff_estimators)) {
+  meff_tbl <- qc$m_eff_estimators %>%
+    mutate(Used = ifelse(in_use, "yes", ""),
+           m_eff = signif(m_eff, 4), p_threshold = signif(p_threshold, 3)) %>%
+    select(Estimator = estimator, `M_eff` = m_eff, `p threshold` = p_threshold, Used)
+
+  write_csv(meff_tbl, "output/manuscript/qc_m_eff.csv")
+
+  meff_tbl %>%
+    kable(caption = paste("Effective number of independent metabolites under several",
+                          "estimators, over", qc$m_eff_estimators$n_features[1],
+                          "features in", qc$m_eff_estimators$n_samples[1],
+                          "samples with complete data on all four methods. The choice",
+                          "of estimator moves the threshold by more than an order of",
+                          "magnitude, which is why it is reported here rather than",
+                          "asserted.")) %>%
+    kable_styling(full_width = FALSE)
+} else skip_note("qc/m_eff_estimators-mesa.csv")
+```
+
+```{r qc-eigenvalues, fig.asp = 0.42}
+if (have(qc$metabolite_eigenvalues)) {
+  spec <- qc$metabolite_eigenvalues
+
+  p_spec <- spec %>%
+    filter(component <= 200) %>%
+    ggplot(aes(x = component, y = eigenvalue)) +
+    geom_line() +
+    scale_y_log10() +
+    labs(x = "Component", y = "Eigenvalue (log scale)")
+
+  p_cum <- spec %>%
+    ggplot(aes(x = component, y = cum_var_explained)) +
+    geom_line() +
+    geom_hline(yintercept = c(0.95, 0.99), linetype = "dashed", color = "gray50") +
+    { if (have(qc$m_eff_estimators))
+        geom_vline(data = filter(qc$m_eff_estimators, in_use),
+                   aes(xintercept = m_eff), color = "firebrick") } +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = "Component", y = "Cumulative variance explained",
+         caption = "Red line: the M_eff the screen threshold uses.")
+
+  p_spec + p_cum
+} else skip_note("qc/metabolite_eigenvalues-mesa.csv")
+```
+
+## Genotype QC
+
+```{r qc-genotype}
+if (have(qc$genotype_qc)) {
+  geno_tbl <- qc$genotype_qc %>%
+    { if (!is.null(anchors)) filter(., cpaid %in% anchors$G | rsid %in% anchors$rsid) else . } %>%
+    mutate(across(c(alt_freq, maf, call_rate), ~ signif(.x, 3))) %>%
+    select(any_of(c("gene", "rsid", "cpaid")), `Counted allele` = counted_allele,
+           `Freq (counted)` = alt_freq, MAF = maf, Called = n_called,
+           `Call rate` = call_rate)
+
+  write_csv(geno_tbl, "output/manuscript/qc_genotype.csv")
+
+  geno_tbl %>%
+    kable(caption = paste("Call rate and dosage polarity for the reported anchors.",
+                          "01b re-polarizes a flipped variant so every dosage counts the",
+                          "allele named in its `cpaid`; a variant whose counted allele is",
+                          "undefined has no named alt in variants_of_interest.csv, and",
+                          "the sign of its effect is relative to an unlabelled allele.")) %>%
+    kable_styling(full_width = FALSE)
+} else skip_note("qc/genotype_qc-mesa.csv")
+```
+
+```{r qc-genotype-by-race}
+if (have(qc$genotype_by_race)) {
+  qc$genotype_by_race %>%
+    { if (!is.null(anchors)) filter(., variant %in% anchors$G) else . } %>%
+    mutate(across(c(freq_counted, maf, call_rate), ~ signif(.x, 3))) %>%
+    select(Variant = variant, Race = race, Participants = n_participants,
+           Called = n_called, `Freq (counted)` = freq_counted, MAF = maf,
+           `Call rate` = call_rate) %>%
+    kable(caption = paste("Allele frequency by self-identified race. MESA is",
+                          "multi-ethnic, so a frequency that swings across groups is",
+                          "the reason the models adjust for genetic PCs and fit",
+                          "gPC x E interaction terms.")) %>%
+    kable_styling(full_width = FALSE)
+} else skip_note("qc/genotype_by_race-mesa.csv")
+```
+
+## Table S1. Participant characteristics
+
+```{r qc-table-s1}
+if (have(qc$table_s1_characteristics)) {
+  s1 <- qc$table_s1_characteristics %>%
+    mutate(cell = case_when(
+      variable == "N"   ~ as.character(n),
+      !is.na(level)     ~ paste0(n, " (", sprintf("%.1f", pct), "%)"),
+      TRUE              ~ paste0(signif(mean, 3), " ± ", signif(sd, 2))),
+      row = ifelse(is.na(level), qc_label(variable),
+                   paste0(qc_label(variable), ": ", level))) %>%
+    select(row, group, cell) %>%
+    pivot_wider(names_from = group, values_from = cell) %>%
+    # A cell is empty only when that level does not occur in that stratum.
+    mutate(across(-row, ~ replace_na(.x, "-")))
+
+  write_csv(s1, "output/manuscript/table_s1_characteristics.csv")
+
+  s1 %>%
+    rename(` ` = row) %>%
+    kable(caption = paste("Table S1. Characteristics of the primary analysis sample",
+                          "(exam-1 rows with metabolomics, genotype at the anchor SNP",
+                          "and HDL-C measured). Continuous variables are mean +/- SD,",
+                          "categorical are n (%).")) %>%
+    kable_styling(full_width = FALSE)
+} else skip_note("qc/table_s1_characteristics-mesa.csv")
+```
+
+```{r qc-n-by-exam}
+if (have(qc$analysis_n_by_exam)) {
+  qc$analysis_n_by_exam %>%
+    select(Exam = exam, Observations = n_rows, Participants = n_individuals) %>%
+    kable(caption = paste("Observations contributed by each exam under the same",
+                          "filters. The longitudinal models pool these, which is why",
+                          "the model n exceeds the number of participants.")) %>%
+    kable_styling(full_width = FALSE)
+}
+```
 
 # Stage 0: how do the anchoring interactions look in MESA?
 
