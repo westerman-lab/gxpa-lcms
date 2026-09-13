@@ -112,12 +112,17 @@ inputs <- tibble(
 # run on a different machine.
 sim_files <- c("sim_params.csv"             = "Simulation parameters",
                "power_summary.csv"          = "Power, Scenario A",
+               "power_bias_summary.csv"     = "Bias and coverage of the GxM estimate",
                "power_z_replicates.csv"     = "Paired GxM z-statistics",
+               "power_z_summary.csv"        = "GxM z agreement within effect size",
+               "dilution_replicates.csv"    = "Dilution identity, per replicate",
+               "dilution_summary.csv"       = "Dilution identity, summary",
                "medmod_summary.csv"         = "Mediated-moderation comparison",
                "icc_grid_summary.csv"       = "ICC_E x ICC_M sensitivity grid",
                "tie_summary.csv"            = "Type I error, scenarios B/C/D",
                "tie_scenarioB_summary.csv"  = "Scenario B variants",
                "tie_scenarioC_summary.csv"  = "Scenario C variants",
+               "tie_scenarioB_nsweep_summary.csv" = "Scenario B over sample size",
                "tie_gamma_summary.csv"      = "Type I error, gamma-distributed E")
 
 inputs <- bind_rows(inputs, tibble(
@@ -1167,11 +1172,16 @@ read_sim <- function(f) {
 sim_params  <- read_sim("sim_params.csv")
 sim_power   <- read_sim("power_summary.csv")
 sim_power_z <- read_sim("power_z_replicates.csv")
+sim_z_agree <- read_sim("power_z_summary.csv")
+sim_bias    <- read_sim("power_bias_summary.csv")
+sim_dil_rep <- read_sim("dilution_replicates.csv")
+sim_dil     <- read_sim("dilution_summary.csv")
 sim_medmod  <- read_sim("medmod_summary.csv")
 sim_icc     <- read_sim("icc_grid_summary.csv")
 sim_tie     <- read_sim("tie_summary.csv")
 sim_tie_b   <- read_sim("tie_scenarioB_summary.csv")
 sim_tie_c   <- read_sim("tie_scenarioC_summary.csv")
+sim_nsweep  <- read_sim("tie_scenarioB_nsweep_summary.csv")
 sim_gamma   <- read_sim("tie_gamma_summary.csv")
 dag_nodes   <- read_sim("dag_nodes.csv")
 dag_edges   <- read_sim("dag_edges.csv")
@@ -1304,11 +1314,15 @@ if (have(sim_power)) {
 The `G:E`-adjusted GxM test is the remedy deployed against the spurious
 scenarios below. Comparing the per-replicate GxM z-statistic with and without
 that adjustment shows it is free under true mediation: the two statistics fall
-on the identity line.
+on the identity line. Agreement is summarised within each true `beta_GxM`, since
+a correlation pooled across effect sizes is inflated by the spread between them.
 
 ```{r sim-power-z, fig.asp = 0.6}
 if (have(sim_power_z)) {
-  r <- cor(sim_power_z$z_gxm, sim_power_z$z_gxm_adj)
+  z_subtitle <- if (have(sim_z_agree)) {
+    sprintf("Median within-effect r = %.3f\nMax |z difference| = %.2f",
+            median(sim_z_agree$r), max(sim_z_agree$max_abs_dz))
+  } else NULL
 
   power_z_panel <<-
     ggplot(sim_power_z, aes(z_gxm, z_gxm_adj, color = factor(beta_GxM))) +
@@ -1317,17 +1331,91 @@ if (have(sim_power_z)) {
       scale_color_brewer(palette = "Greens", name = expression(paste("True ", beta[GxM]))) +
       coord_equal() +
       labs(x = "GxM z (unadjusted)", y = "GxM z (G:E-adjusted)",
-           subtitle = sprintf("Pearson r = %.4f", r)) +
+           subtitle = z_subtitle) +
       theme(legend.position = "bottom")
   print(power_z_panel)
 } else cat("results/simulation/power_z_replicates.csv not available - skipping.\n")
+```
+
+Rejection rates say nothing about where the estimate sits. Bias is against the
+true structural `beta_GxM`, so under measurement error in M it includes the
+expected attenuation; coverage is of the nominal 95% interval.
+
+```{r sim-power-bias}
+if (have(sim_bias)) {
+  sim_bias %>%
+    transmute(`True beta_GxM` = beta_GxM, ICC_E, ICC_M,
+              Model    = recode(model, gxm = "Unadjusted", gxm_adj = "G:E-adjusted"),
+              `Mean estimate (95% CI)` = sprintf("%.4f (%.4f, %.4f)", mean_est, est_lo, est_hi),
+              Bias     = round(bias, 4),
+              Coverage = sprintf("%.2f (%.2f, %.2f)", coverage, coverage_lo, coverage_hi),
+              Replicates = n_used) %>%
+    kable(caption = "Bias and 95% interval coverage of the GxM estimate, Scenario A") %>%
+    kable_styling(full_width = FALSE)
+} else cat("results/simulation/power_bias_summary.csv not available - skipping.\n")
+```
+
+## Dilution identity
+
+The conceptual model claims the induced GxE interaction is a diluted image of
+the GxM interaction, `beta_GxE ≈ alpha * beta_GxM`, with `alpha` the standardized
+E-M association, and the applied dilution check above leans on it. Under
+Scenario A (`beta_GxM` fixed, `beta_EM` swept, `ICC_E` and `ICC_M` each 0.5 or 1),
+each replicate standardizes Y, E and M and compares the observed GxE estimate with
+`alpha_hat * beta_GxM_hat`, using both the marginal GxM estimate the identity
+concerns and the G:E-adjusted estimate the applied analysis reports.
+
+```{r sim-dilution, fig.width = 12, fig.asp = 0.75}
+if (have(sim_dil_rep) && have(sim_dil)) {
+  dil_estimate_labels <- c(marginal = "Marginal GxM", adjusted = "G:E-adjusted GxM")
+  label_dilution <- function(dat) {
+    dat %>%
+      arrange(desc(ICC_E), desc(ICC_M)) %>%
+      mutate(condition = fct_inorder(sprintf("ICC_E = %.1f, ICC_M = %.1f", ICC_E, ICC_M)),
+             estimate  = factor(unname(dil_estimate_labels[estimate]),
+                                levels = unname(dil_estimate_labels)))
+  }
+
+  dil_scatter <- sim_dil_rep %>%
+    label_dilution() %>%
+    ggplot(aes(predicted_gxe, beta_gxe, color = beta_EM)) +
+    geom_hline(yintercept = 0, color = "grey85") +
+    geom_vline(xintercept = 0, color = "grey85") +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40") +
+    geom_point(alpha = 0.4, size = 0.8) +
+    facet_grid(estimate ~ condition) +
+    scale_color_viridis_c(name = expression(beta[EM])) +
+    labs(x = expression("Predicted " * beta[GxE] == hat(alpha) %*% hat(beta)[GxM]),
+         y = expression("Observed " * hat(beta)[GxE]))
+
+  # At beta_EM = 0 the predicted GxE is zero and the ratio has no estimand.
+  dil_ratio <- sim_dil %>%
+    filter(beta_EM > 0) %>%
+    label_dilution() %>%
+    mutate(beta_EM_label = fct_inorder(sprintf("beta[EM] == %.2f", beta_EM)),
+           ICC_M = factor(ICC_M)) %>%
+    ggplot(aes(ICC_E, ratio_median, color = ICC_M, group = ICC_M)) +
+    geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
+    geom_line(linewidth = 0.6) +
+    geom_point(size = 2) +
+    facet_grid(estimate ~ beta_EM_label, labeller = labeller(beta_EM_label = label_parsed)) +
+    scale_x_continuous(breaks = sort(unique(sim_dil$ICC_E))) +
+    scale_color_brewer(palette = "Dark2", name = expression(ICC[M])) +
+    labs(x = expression(ICC[E]),
+         y = expression("Median " * hat(beta)[GxE] / (hat(alpha) %*% hat(beta)[GxM])))
+
+  print(dil_scatter / dil_ratio + plot_layout(heights = c(1.1, 1)))
+} else cat("results/simulation/dilution_replicates.csv and dilution_summary.csv not available - skipping.\n")
 ```
 
 ## Comparison with formal mediated-moderation testing
 
 ```{r sim-medmod, fig.asp = 0.5}
 if (have(sim_medmod)) {
+  # At beta_EM = 0 there is no indirect effect, so the formal test's rejection
+  # rate there is type I error on a power axis. GxE and GxM keep that point.
   dat <- sim_medmod %>%
+    filter(test != "p_med" | beta_EM > 0) %>%
     label_tests() %>%
     mutate(test      = factor(test, levels = c("GxE", "GxM", "Mediation")),
            condition = factor(unname(medmod_labels[condition]),
@@ -1388,6 +1476,10 @@ if (length(panels)) {
 
 ```{r sim-tie-table}
 if (have(sim_tie)) {
+  # An export from before the notebook kept GxM estimates has no estimate columns.
+  if (!"mean_est" %in% names(sim_tie))
+    sim_tie <- mutate(sim_tie, mean_est = NA_real_, est_lo = NA_real_, est_hi = NA_real_)
+
   sim_tie %>%
     filter(!is.na(rate)) %>%
     label_tests() %>%
@@ -1396,6 +1488,9 @@ if (have(sim_tie)) {
               Model = test,
               `Rejection rate` = round(rate, 3),
               `95% CI` = sprintf("%.3f - %.3f", lo, hi),
+              # Blank for the GxE row, which estimates no GxM coefficient.
+              `Mean GxM estimate (95% CI)` = ifelse(is.na(mean_est), "",
+                sprintf("%.4f (%.4f, %.4f)", mean_est, est_lo, est_hi)),
               Replicates = n_used) %>%
     arrange(Scenario, Measurement, Model) %>%
     kable(caption = "Type I error of the GxM test by scenario and adjustment") %>%
@@ -1403,6 +1498,23 @@ if (have(sim_tie)) {
 
   write_csv(sim_tie, "output/manuscript/sim_type1_error.csv")
 }
+```
+
+The inflation that survives the `G:E` adjustment in Scenario B is a bias rather
+than an inflated variance, so the mean spurious coefficient stays put as N grows
+while the rejection rate climbs.
+
+```{r sim-nsweep}
+if (have(sim_nsweep)) {
+  sim_nsweep %>%
+    transmute(N = scales::comma(N),
+              Model = recode(model, unadj = "Unadjusted", adj_GxE = "G:E-adjusted"),
+              `Rejection rate (95% CI)` = sprintf("%.3f (%.3f, %.3f)", rate, lo, hi),
+              `Mean GxM estimate (95% CI)` = sprintf("%.4f (%.4f, %.4f)", mean_est, est_lo, est_hi),
+              Replicates = n_used) %>%
+    kable(caption = "Scenario B, realistic measurement: rejection rate and mean GxM estimate by sample size") %>%
+    kable_styling(full_width = FALSE)
+} else cat("results/simulation/tie_scenarioB_nsweep_summary.csv not available - skipping.\n")
 ```
 
 ## Combined manuscript figure
@@ -1439,31 +1551,39 @@ if (length(rows) == 3) {
 
 ## Sensitivity: nonnegative (gamma-distributed) exposure
 
-Rejection rates under `E ~ Gamma(4, 2)` against the normally-distributed
-exposure at perfect measurement, so the two columns differ only in the shape of
-E.
+Rejection rates under a Gamma(shape = 4) exposure against the normally
+distributed exposure, under perfect and realistic measurement. The gamma
+exposure is scaled to the variance of E in each normal-E scenario and measured
+with error through a Gaussian copula that keeps it nonnegative, with the
+confounder U in Scenario D entering through the same copula, so the two columns
+differ only in the shape of E.
 
-```{r sim-gamma, fig.asp = 0.5}
+```{r sim-gamma, fig.asp = 0.8}
 if (have(sim_gamma) && have(sim_tie)) {
+  # An export from before the gamma arm gained measurement error ran at perfect
+  # measurement only, so it compares against that condition alone.
+  if (!"icc_condition" %in% names(sim_gamma)) sim_gamma$icc_condition <- "perfect"
+
   normal_arm <- sim_tie %>%
-    filter(icc_condition == "perfect") %>%
-    transmute(scenario, model = unname(test_labels[test]),
-              rate, e_dist = "E ~ N(0, 1)")
+    filter(icc_condition %in% sim_gamma$icc_condition) %>%
+    transmute(scenario, icc_condition, model = unname(test_labels[test]),
+              rate, e_dist = "Normal E")
 
   gamma_arm <- sim_gamma %>%
-    transmute(scenario, model = unname(test_labels[test]),
-              rate, e_dist = "E ~ Gamma(4, 2)")
+    transmute(scenario, icc_condition, model = unname(test_labels[test]),
+              rate, e_dist = "Gamma E (shape 4)")
 
   bind_rows(normal_arm, gamma_arm) %>%
     filter(!is.na(rate), model %in% D_MODELS) %>%
+    label_icc() %>%
     mutate(model    = factor(model, levels = D_MODELS),
-           e_dist   = factor(e_dist, levels = c("E ~ N(0, 1)", "E ~ Gamma(4, 2)")),
+           e_dist   = factor(e_dist, levels = c("Normal E", "Gamma E (shape 4)")),
            scenario = paste("Scenario", scenario)) %>%
     ggplot(aes(model, rate, fill = e_dist)) +
     geom_col(position = position_dodge(width = 0.75), width = 0.65, color = "grey20") +
     geom_hline(yintercept = SIM_ALPHA, linetype = "dashed", color = "grey40") +
-    facet_wrap(~ scenario, scales = "free_x") +
-    scale_fill_manual(values = c("E ~ N(0, 1)" = "#7570b3", "E ~ Gamma(4, 2)" = "#d95f02")) +
+    facet_grid(condition ~ scenario, scales = "free_x", space = "free_x") +
+    scale_fill_manual(values = c("Normal E" = "#7570b3", "Gamma E (shape 4)" = "#d95f02")) +
     scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
     labs(x = NULL, y = "Type I error rate of GxM test", fill = "Exposure distribution") +
     theme(legend.position = "bottom", axis.text.x = element_text(size = 8, angle = 30, hjust = 1))

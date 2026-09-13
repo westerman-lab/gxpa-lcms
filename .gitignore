@@ -25,6 +25,7 @@ scratch/
 *.png
 *.RData
 *.rds
+CLAUDE.md
 
 .ipynb_checkpoints/
 .virtual_documents/
