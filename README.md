@@ -62,32 +62,66 @@ so a partially copied `results/qc/` still knits.
 
 # Hand-maintained tables
 
-Three small CSVs are edited by hand rather than produced by a notebook. They are
-versioned here, but two of them are **read from the workspace bucket**, not from this
-repository, and the bucket copy is the one that takes effect:
+Three small CSVs are edited by hand rather than produced by a notebook. All three are
+versioned here, but **the copy that takes effect is the one published to the workspace
+bucket**, because that is the only copy the notebooks can read:
 
 | File | Read by | Ground truth |
 |---|---|---|
+| `anchors.csv` | `01c`, `02a`, `02b`, `02c`, `03c`, `manuscript.Rmd` | **workspace bucket** |
 | `variants_of_interest.csv` | `01b`, `02b`, `03c`, `manuscript.Rmd` | **workspace bucket** |
 | `geno_files_drs.csv` | `01b` | **workspace bucket** |
-| `anchors.csv` | `manuscript.Rmd` only | this repository |
 
-The split exists because of how notebooks reach Terra: only `*.ipynb` files are copied
-into the VM's working directory, so a notebook running there cannot read a CSV that
-lives only in the repo. `anchors.csv` is exempt because nothing but `manuscript.Rmd`
-reads it, and that renders locally, inside this repo.
+On Terra only `*.ipynb` files are copied into the VM's working directory, so a notebook
+running there cannot read a CSV that lives only in the repo.
 
-**After editing either bucket-backed file, publish it** — otherwise the change is
-invisible to every notebook, and the two copies silently diverge:
+**After editing any of them, publish it** — otherwise the change is invisible to every
+notebook, and the two copies silently diverge:
 
 ```
-gcloud storage cp variants_of_interest.csv geno_files_drs.csv \
+gcloud storage cp anchors.csv variants_of_interest.csv geno_files_drs.csv \
   gs://fc-secure-4a392455-5587-4d6f-b8bd-01a1f834ae63/
 ```
 
-Run that from this directory on a machine with `gcloud` authenticated; it does not
-involve the Terra notebook-sync path. `manuscript.Rmd` reads the published copy and
-flags it in its output if the repo copy has drifted from it.
+Run that from this directory on a machine with `gcloud` authenticated; it does not involve
+the Terra notebook-sync path. `manuscript.Rmd` reads the published copies and flags any
+that the repo copy has drifted from.
+
+## Lanes (`anchors.csv`)
+
+A **lane** is one declared (SNP, outcome, exposure) triple whose interaction the paper
+follows up. `anchors.csv` is the single declaration of them: no notebook names a SNP, an
+outcome or an exposure itself, so adding, removing or parking a lane is one row here.
+
+| Column | Meaning |
+|---|---|
+| `lane_id` | Short unique key, e.g. `fto_mvpa_bmi`. Every results file is keyed by it. |
+| `G`, `Y`, `E` | Dosage column, outcome and exposure, as named in the analysis frame. `G` must equal the `cpaid` in `variants_of_interest.csv`, which in turn must equal `chr_pos_ref_alt` — `01b` names dosage columns from ref/alt, and `02b` stops if they disagree. |
+| `rsid`, `gene`, `label` | Display. |
+| `include` | `TRUE` = reported by `manuscript.Rmd`. `FALSE` lanes are **still screened** by `02b` and replicated by `03c`; their rows stay in `results/` and are simply not reported. |
+| `extra_covars` | Optional covariates for this lane only, space-separated, added to its interaction models (GxE, the metabolome-wide screen, the GxCovar sensitivity) but not to the marginal Y~G / E~G checks, which lanes can share. |
+| `provenance` | Why the lane is here. |
+
+Rules enforced on read, in every notebook:
+
+* **A lane may not use one trait on both sides.** Traits are compared ignoring the
+  derivation suffix, so `bmi_covariate` and `bmi` are the same trait and such a lane is
+  refused outright.
+* **No model adjusts for its own outcome or exposure.** Covariates — including
+  `extra_covars` — are filtered by trait, not by name. A name-level `setdiff` would miss
+  exactly the case that matters: `bmi_covariate` as a precision covariate in a lane whose
+  outcome is `bmi`.
+* The **primary lane** is the first `include = TRUE` row. It defines the sample Table S1
+  and the n-by-exam export describe, so reordering rows changes it.
+
+BMI appears under two names on purpose, and the difference is imputation. `bmi` is the
+value **as measured** -- neither winsorized nor filled in -- and is the **outcome** of the
+FTO lane. `bmi_covariate` is a copy that is winsorized, median-imputed at exam 1 and carried
+forward, and is what the CETP lanes use as their **exposure** and what any lane would use as
+a covariate. The rule is the same for every outcome: an imputed value is acceptable on the
+right-hand side of a model, never on the left -- which is also why HDL and TG are not carried
+forward. BMI is left untransformed (per-allele FTO effects are conventionally reported in
+kg/m2), whereas the lipid outcomes are logged.
 
 # Repository workflow
 

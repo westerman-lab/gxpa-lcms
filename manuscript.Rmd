@@ -59,39 +59,39 @@ if (have(met_info) && !("met_label" %in% names(met_info))) {
       TRUE               ~ paste0("m/z ", round(MZ, 4))))
 }
 
-# Ground truth for this table is the workspace bucket: on Terra only *.ipynb
-# reaches the VM working directory, so the notebooks cannot read a repo-side CSV
-# and 01b/02b/03c all read the bucket copy. Read the same copy they do, so this
-# report and 02b can never disagree about gene assignments. Fall back to the repo
-# copy when the bucket is unreachable, and say which was used.
-voi_bucket <- paste0(Sys.getenv("WORKSPACE_BUCKET",
-                                unset = "gs://fc-secure-4a392455-5587-4d6f-b8bd-01a1f834ae63"),
-                     "/variants_of_interest.csv")
-voi_tmp <- file.path(tempdir(), "variants_of_interest.csv")
-voi_ok  <- system(paste("gcloud storage cp", shQuote(voi_bucket), shQuote(voi_tmp)),
-                  ignore.stdout = TRUE, ignore.stderr = TRUE) == 0
-
-variants_of_interest <- if (voi_ok) {
-  read_csv(voi_tmp, show_col_types = FALSE)
-} else if (file.exists("variants_of_interest.csv")) {
-  read_csv("variants_of_interest.csv", show_col_types = FALSE)
-} else NULL
-
-voi_source <- if (voi_ok) {
-  "workspace bucket (what the notebooks read)"
-} else if (!is.null(variants_of_interest)) {
-  "local repo copy - the bucket was unreachable"
-} else {
-  "not available"
+# Ground truth for the hand-maintained tables is the workspace bucket: on Terra only
+# *.ipynb reaches the VM working directory, so the notebooks cannot read a repo-side CSV
+# and read the bucket copies. Read the same copies they do, so this report and the
+# notebooks can never disagree about gene assignments or about which lanes exist. Fall
+# back to the repo copy when the bucket is unreachable, and say which was used.
+config_bucket <- Sys.getenv("WORKSPACE_BUCKET",
+                            unset = "gs://fc-secure-4a392455-5587-4d6f-b8bd-01a1f834ae63")
+read_config <- function(name) {
+  tmp <- file.path(tempdir(), name)
+  ok  <- system(paste("gcloud storage cp", shQuote(paste0(config_bucket, "/", name)), shQuote(tmp)),
+                ignore.stdout = TRUE, ignore.stderr = TRUE) == 0
+  dat <- if (ok) {
+    read_csv(tmp, show_col_types = FALSE)
+  } else if (file.exists(name)) {
+    read_csv(name, show_col_types = FALSE)
+  } else NULL
+  source <- if (ok) {
+    "workspace bucket (what the notebooks read)"
+  } else if (!is.null(dat)) {
+    "local repo copy - the bucket was unreachable"
+  } else {
+    "not available"
+  }
+  # An edit committed to the repo but never published is invisible to every notebook.
+  if (ok && file.exists(name) &&
+      !identical(readLines(name, warn = FALSE), readLines(tmp, warn = FALSE)))
+    source <- paste(source, "** REPO COPY HAS DRIFTED - publish it, see README **")
+  list(data = dat, source = source)
 }
 
-# An edit committed to the repo but never published is invisible to every
-# notebook, which is exactly how the two copies drifted before. Surface it.
-if (voi_ok && file.exists("variants_of_interest.csv") &&
-    !identical(readLines("variants_of_interest.csv", warn = FALSE),
-               readLines(voi_tmp, warn = FALSE))) {
-  voi_source <- paste(voi_source, "** REPO COPY HAS DRIFTED - publish it, see README **")
-}
+voi_cfg <- read_config("variants_of_interest.csv")
+variants_of_interest <- voi_cfg$data
+voi_source <- voi_cfg$source
 
 inputs <- tibble(
   File = c("mesa_signif_GxMs.csv", "GxM_results.csv", "Y_G.csv", "E_G.csv",
@@ -143,7 +143,7 @@ inputs <- bind_rows(inputs, tibble(
 # travels as counts, quantiles and per-feature statistics instead.
 qc_files <- c(
   "sample_flow-mesa.csv"                  = "Sample flow, MESA exams to analysis rows",
-  "metabolomics_lane_coverage-mesa.csv"   = "Coverage by LC-MS method",
+  "metabolomics_method_coverage-mesa.csv" = "Coverage by LC-MS method",
   "imputation_ledger-mesa.csv"            = "Imputation counts, per variable per exam",
   "variable_distributions-mesa.csv"       = "Exposure/outcome distributions by exam",
   "lipid_medication-mesa.csv"             = "Lipid-lowering medication",
@@ -170,6 +170,17 @@ qc <- list()
 for (f in names(qc_files))
   qc[sub("-mesa\\.csv$|\\.csv$", "", f)] <- list(read_result(file.path("qc", f)))
 
+# 01c called LC-MS methods "lanes" until lane came to mean a declared (G, Y, E) analysis.
+# Accept files written under the old names, so a results/qc/ that predates the rename
+# still renders.
+if (!have(qc$metabolomics_method_coverage)) {
+  legacy <- read_result("qc/metabolomics_lane_coverage-mesa.csv")
+  if (have(legacy)) qc["metabolomics_method_coverage"] <- list(rename(legacy, method = lane))
+}
+for (n in c("metabolite_icc", "metabolite_icc_summary"))
+  if (have(qc[[n]]) && "lane" %in% names(qc[[n]]) && !("method" %in% names(qc[[n]])))
+    qc[n] <- list(rename(qc[[n]], method = lane))
+
 inputs <- bind_rows(inputs, tibble(
   File     = file.path("qc", names(qc_files)),
   Contents = unname(qc_files),
@@ -193,19 +204,20 @@ p_thresh_mwas     <- if (have(params)) params$p_thresh_mwas[1]     else 0.05 / N
 threshold_source  <- if (have(params)) "read from analysis_params.csv" else "fallback default"
 
 # Readable labels for outcomes and exposures.
-outcome_labels  <- c(hdl_log = "log(HDL-C)", tg_log = "log(TG)",
+outcome_labels  <- c(hdl_log = "log(HDL-C)", tg_log = "log(TG)", bmi = "BMI",
                      fg = "Fasting glucose", hb = "HbA1c")
-exposure_labels <- c(mvpa_wins = "MVPA", bmi = "BMI", sex = "Sex", smoking = "Smoking")
+exposure_labels <- c(mvpa_wins = "MVPA", bmi_covariate = "BMI", bmi = "BMI", sex = "Sex", smoking = "Smoking")
 
 relabel <- function(x, lookup) coalesce(unname(lookup[x]), x)
 
 # Display names for the QC tables. The raw name is the auditable key, so it stays
 # in the exported CSVs; only what a reader sees is relabelled.
 qc_var_labels <- c(
-  age = "Age (years)", bmi = "BMI (kg/m2)", hdl = "HDL-C (mg/dL)",
+  age = "Age (years)", bmi = "BMI (kg/m2), as measured", hdl = "HDL-C (mg/dL)",
   hdl_log = "log(HDL-C)", tg = "Triglycerides (mg/dL)", tg_log = "log(TG)",
+  bmi_covariate = "BMI (kg/m2), winsorized and imputed (exposure/covariate)",
   fg = "Fasting glucose (mg/dL)", hb = "HbA1c (%)",
-  mvpa = "MVPA (MET-min/week)", mvpa_wins = "MVPA, winsorized",
+  mvpa = "MVPA (MET-hours/week)", mvpa_wins = "MVPA, winsorized",
   mvpa_log = "log(MVPA + 1)", mvpa_trunc = "MVPA, truncated",
   pa = "Total PA", mod_pa = "Moderate PA", vig_pa = "Vigorous PA",
   ahei_score = "AHEI-2010 score", dash_score = "DASH score",
@@ -225,6 +237,12 @@ qc_quantity_labels <- c(feature_missingness = "Missingness per feature",
 # `df` (Satterthwaite degrees of freedom), which would shadow the argument inside
 # mutate()'s data mask and silently break the gene lookup.
 anchor_label <- function(dat) {
+  dat <- with_lane(dat)
+  if ("lane_id" %in% names(dat) && !is.null(lanes_all))
+    return(dat %>%
+             left_join(select(lanes_all, lane_id, lane_label = label), by = "lane_id") %>%
+             mutate(anchor = coalesce(lane_label, paste(G, Y, E, sep = " / "))) %>%
+             select(-lane_label))
   has_gene <- "gene" %in% names(dat)
   dat %>%
     mutate(anchor = paste0(if (has_gene) coalesce(gene, rsid) else rsid,
@@ -249,32 +267,61 @@ anchor_label <- function(dat) {
 # Dropping the CETP locus to a physical-activity-only paper is one edit there.
 # ---------------------------------------------------------------------------
 
-anchors <- if (file.exists("anchors.csv")) {
-  read_csv("anchors.csv", show_col_types = FALSE) %>% filter(include)
-} else {
-  NULL
+anchors_cfg    <- read_config("anchors.csv")
+lanes_all      <- anchors_cfg$data
+anchors_source <- anchors_cfg$source
+if (!is.null(lanes_all) && !("lane_id" %in% names(lanes_all))) {
+  warning("anchors.csv has no lane_id column - publish the current version (see README).")
+  lanes_all <- NULL
+}
+if (!is.null(lanes_all)) lanes_all <- mutate(lanes_all, include = as.logical(include))
+anchors <- if (!is.null(lanes_all)) filter(lanes_all, include) else NULL
+
+# The primary lane (first included row) defines the Table S1 sample; see 02a.
+primary_lane <- if (!is.null(anchors) && nrow(anchors)) anchors[1, ] else NULL
+
+# Results written before lanes existed carry (G, Y, E) but no lane_id; attach it by exact
+# match. Rows matching no declared lane keep lane_id = NA and so fall out of scope.
+# The trait a variable measures, ignoring how it was derived (bmi and bmi_covariate are
+# both BMI). Same rule as the notebooks' trait().
+trait <- function(v) sub("_(log|wins|trunc|covariate)$", "", v)
+
+# Matched on the SNP and the outcome/exposure TRAITS, so a result written when the CETP
+# exposure was still named bmi attaches to the lane that now names it bmi_covariate.
+with_lane <- function(dat) {
+  if (is.null(dat) || nrow(dat) == 0 || is.null(lanes_all)) return(dat)
+  if (!("lane_id" %in% names(dat)) && all(c("G", "Y", "E") %in% names(dat)))
+    dat <- dat %>%
+      mutate(.yt = trait(Y), .et = trait(E)) %>%
+      left_join(transmute(lanes_all, lane_id, G, .yt = trait(Y), .et = trait(E)),
+                by = c("G", ".yt", ".et")) %>%
+      select(-.yt, -.et)
+  dat
 }
 
 if (is.null(anchors)) {
-  warning("anchors.csv not found - reporting every anchor present in the results.")
+  warning("No usable anchors.csv (missing, or it predates lane_id) - reporting every lane present in the results.")
   in_scope    <- function(dat, ...) dat
-  scope_note  <- "no anchors.csv found; every screened anchor is reported"
+  scope_note  <- "no usable anchors.csv (missing, or published before lane_id existed); every screened lane is reported"
 } else {
-  # Anchor-keyed tables (GxM, GxE, GxCovar) match on all three of G, Y, E.
   in_scope <- function(dat) {
-    if (is.null(dat) || nrow(dat) == 0) return(dat)
-    keys <- intersect(c("G", "Y", "E"), names(dat))
-    if (length(keys) == 0) return(dat)
-    semi_join(dat, distinct(anchors[keys]), by = keys)
+    dat <- with_lane(dat)
+    if (is.null(dat) || nrow(dat) == 0 || !("lane_id" %in% names(dat))) return(dat)
+    filter(dat, lane_id %in% anchors$lane_id)
   }
   scope_note <- paste(anchors$label, collapse = "; ")
 }
 
-# Marginal tables are keyed by only part of the anchor, so they get their own
-# filters rather than being forced through in_scope().
+# Marginal tables (Y~G, E~G) are keyed by only part of a lane, and a pair two lanes share
+# is written once per lane. Keep a pair if any included lane uses it, and show it once.
 keep_pairs <- function(dat, a, b) {
   if (is.null(dat) || nrow(dat) == 0 || is.null(anchors)) return(dat)
-  semi_join(dat, distinct(anchors[c(a, b)]), by = c(a, b))
+  if ("lane_id" %in% names(dat))
+    return(dat %>% filter(lane_id %in% anchors$lane_id) %>%
+             distinct(across(-lane_id), .keep_all = TRUE))
+  key <- distinct(tibble(.k = trait(anchors[[a]]), .g = anchors[[b]]))   # By trait, as with_lane().
+  dat %>% mutate(.k = trait(.data[[a]]), .g = .data[[b]]) %>%
+    semi_join(key, by = c(".k", ".g")) %>% select(-.k, -.g)
 }
 
 gxm_all    <- in_scope(gxm_all)
@@ -284,8 +331,11 @@ signif_gxm <- in_scope(signif_gxm)      # hit selection is per-row, so filtering
                                         # and re-selecting give the same rows.
 y_g        <- keep_pairs(y_g, "Y", "G")
 e_g        <- keep_pairs(e_g, "E", "G")
-m_e        <- if (have(signif_gxm) && have(m_e))
-                semi_join(m_e, distinct(select(signif_gxm, M, E)), by = c("M", "E")) else m_e
+m_e        <- if (have(signif_gxm) && have(m_e)) {
+                keys <- if (all(c("lane_id") %in% names(m_e)) && "lane_id" %in% names(signif_gxm))
+                          c("lane_id", "M") else c("M", "E")
+                semi_join(m_e, distinct(select(signif_gxm, all_of(keys))), by = keys)
+              } else m_e
 ```
 
 
@@ -300,14 +350,31 @@ inputs %>%
 
 Variant table read from: **`r voi_source`**
 
-Anchors reported: **`r scope_note`**
-(pre-specified in `anchors.csv`; anchors with `include = FALSE` remain in
-`results/` but are not reported here).
+Lanes read from: **`r anchors_source`**
+
+Lanes reported: **`r scope_note`**
+(declared in `anchors.csv`; lanes with `include = FALSE` are still screened and remain
+in `results/`, but are not reported here).
+
+```{r lanes-declared}
+if (!is.null(lanes_all)) {
+  lanes_all %>%
+    mutate(Outcome = relabel(Y, outcome_labels), Exposure = relabel(E, exposure_labels),
+           Reported = ifelse(include, "yes", "no")) %>%
+    select(Lane = lane_id, Label = label, Gene = gene, rsid, SNP = G, Outcome, Exposure,
+           Reported, any_of(c(`Extra covariates` = "extra_covars")), Provenance = provenance) %>%
+    kable(caption = paste("Declared lanes. Every row is screened by 02b; `Reported`",
+                          "controls whether this report shows it.")) %>%
+    kable_styling(full_width = FALSE)
+}
+```
 
 Screen-wide significance threshold: **p < `r signif(p_thresh_mwas, 3)`**
 (Bonferroni over `r signif(N_EFF_METABOLITES, 4)` effective metabolites;
-`r threshold_source`). Note that this corrects across metabolites within an
-anchor, not across anchors.
+`r threshold_source`). Note that this corrects across metabolites **within a lane**,
+not across the `r if (!is.null(lanes_all)) nrow(lanes_all) else "declared"` lanes,
+each of which screens the same metabolome. Whether to also correct across lanes -- or
+across distinct SNPs, since lanes can share one -- is an open threshold decision.
 
 # Upstream QC
 
@@ -321,48 +388,58 @@ made them.
 
 ```{r qc-sample-flow}
 if (have(qc$sample_flow)) {
-  flow_tbl <- qc$sample_flow %>%
+  flow <- qc$sample_flow
+  per_lane <- "lane_id" %in% names(flow)
+  if (per_lane && !is.null(anchors)) flow <- filter(flow, lane_id %in% anchors$lane_id)
+  if (per_lane && !is.null(lanes_all))
+    flow <- left_join(flow, select(lanes_all, lane_id, Lane = label), by = "lane_id")
+  if ("variable" %in% names(flow))   # Name the lane's own outcome/exposure in the stage.
+    flow <- mutate(flow, stage = ifelse(is.na(variable) | grepl("^chr", variable), stage,
+                                        paste0(stage, ": ", qc_label(variable))))
+
+  flow_tbl <- flow %>%
     filter(exam == "all") %>%
-    arrange(step) %>%
-    select(Step = step, Stage = stage, Rows = n_rows, Participants = n_individuals,
-           `Rows lost` = rows_dropped, `Participants lost` = individuals_dropped,
-           Reason = reason)
+    arrange(across(any_of("Lane")), step) %>%
+    select(any_of("Lane"), Step = step, Stage = stage, Rows = n_rows,
+           Participants = n_individuals, `Rows lost` = rows_dropped,
+           `Participants lost` = individuals_dropped, Reason = reason)
 
   write_csv(flow_tbl, "output/manuscript/qc_sample_flow.csv")
 
   flow_tbl %>%
     kable(caption = paste("Sample flow. Filters are cumulative and in the order the",
                           "analysis applies them; a row is one participant-exam",
-                          "observation. The last row is the n the primary model sees.")) %>%
+                          "observation. Steps from the SNP onward are each lane's own,",
+                          "so the last row of each lane is the n that lane's model sees.")) %>%
     kable_styling(full_width = FALSE)
 } else skip_note("qc/sample_flow-mesa.csv")
 ```
 
 ```{r qc-sample-flow-by-exam}
 if (have(qc$sample_flow)) {
-  qc$sample_flow %>%
+  flow %>%
     filter(exam != "all") %>%
-    arrange(step) %>%
-    select(Stage = stage, exam, n_rows) %>%
+    arrange(across(any_of("Lane")), step) %>%
+    select(any_of("Lane"), Stage = stage, exam, n_rows) %>%
     pivot_wider(names_from = exam, names_prefix = "Exam ", values_from = n_rows) %>%
     kable(caption = paste("Sample flow by exam. Exam 4 carries no physical-activity",
                           "questionnaire, and metabolomics was run on a subset of exams,",
-                          "so the losses are not spread evenly.")) %>%
+                          "so the losses are not spread evenly -- and differ by lane.")) %>%
     kable_styling(full_width = FALSE)
 }
 ```
 
-```{r qc-lane-coverage}
-if (have(qc$metabolomics_lane_coverage)) {
-  qc$metabolomics_lane_coverage %>%
+```{r qc-method-coverage}
+if (have(qc$metabolomics_method_coverage)) {
+  qc$metabolomics_method_coverage %>%
     filter(exam == "all") %>%
-    select(`LC-MS method` = lane, Features = n_features,
+    select(`LC-MS method` = method, Features = n_features,
            Observations = n_rows, Participants = n_individuals) %>%
     kable(caption = paste("Coverage by LC-MS method. A sample can pass QC on one",
                           "method and fail on another, so the n behind a given",
                           "metabolite depends on which method it came from.")) %>%
     kable_styling(full_width = FALSE)
-} else skip_note("qc/metabolomics_lane_coverage-mesa.csv")
+} else skip_note("qc/metabolomics_method_coverage-mesa.csv")
 ```
 
 ## Imputation
@@ -423,7 +500,7 @@ if (have(qc$variable_distributions)) {
 if (have(qc$variable_distributions)) {
   qc$variable_distributions %>%
     filter(exam != "all",
-           variable %in% c("hdl", "hdl_log", "tg", "bmi", "age", "mvpa", "mvpa_wins", "fg")) %>%
+           variable %in% c("hdl", "hdl_log", "tg", "bmi", "bmi_covariate", "age", "mvpa", "mvpa_wins", "fg")) %>%
     mutate(exam = factor(exam), variable = qc_label(variable)) %>%
     ggplot(aes(x = exam, y = median)) +
     geom_pointrange(aes(ymin = p25, ymax = p75), size = 0.3) +
@@ -486,7 +563,7 @@ if (have(qc$icc) || have(qc$metabolite_icc_summary)) {
         transmute(label = qc_label(variable), kind = "Phenotype", point = icc) else NULL,
     if (have(qc$metabolite_icc_summary))
       qc$metabolite_icc_summary %>%
-        transmute(label = gsub("_", "-", lane), kind = "Metabolites (per feature)",
+        transmute(label = gsub("_", "-", method), kind = "Metabolites (per feature)",
                   p05, p25, median, p75, p95) else NULL) %>%
     mutate(label = fct_inorder(label),
            kind  = factor(kind, levels = c("Phenotype", "Metabolites (per feature)")))
@@ -554,12 +631,14 @@ if (have(qc$metabolite_icc) && have(signif_gxm)) {
 ```{r qc-covariate-ladder, fig.asp = 0.5}
 if (have(qc$covariate_ladder)) {
   qc$covariate_ladder %>%
-    filter(outcome == "hdl_log", !grepl("^chr", variable)) %>%
-    mutate(covar_set = fct_inorder(covar_set), variable = qc_label(variable)) %>%
+    filter(outcome %in% (if (!is.null(anchors)) anchors$Y else "hdl_log"),
+           !grepl("^chr", variable)) %>%
+    mutate(covar_set = fct_inorder(covar_set), variable = qc_label(variable),
+           outcome = qc_label(outcome)) %>%
     ggplot(aes(x = covar_set, y = estimate, color = covar_set)) +
     geom_hline(yintercept = 0, color = "gray70") +
     geom_pointrange(aes(ymin = l95, ymax = u95), size = 0.3) +
-    facet_wrap(vars(variable), scales = "free_y") +
+    facet_wrap(vars(outcome, variable), scales = "free_y") +
     scale_x_discrete(labels = NULL, breaks = NULL) +
     labs(x = NULL, y = "Standardised estimate",
          color = "Covariate set",
@@ -768,10 +847,13 @@ if (have(qc$table_s1_characteristics)) {
 
   s1 %>%
     rename(` ` = row) %>%
-    kable(caption = paste("Table S1. Characteristics of the primary analysis sample",
-                          "(exam-1 rows with metabolomics, genotype at the anchor SNP",
-                          "and HDL-C measured). Continuous variables are mean +/- SD,",
-                          "categorical are n (%).")) %>%
+    kable(caption = paste0("Table S1. Characteristics of the primary analysis sample ",
+                           "(exam-1 rows with metabolomics, genotype at the primary lane's SNP",
+                           if (!is.null(primary_lane)) paste0(" (", primary_lane$gene, " ", primary_lane$rsid, ")") else "",
+                           " and its outcome",
+                           if (!is.null(primary_lane)) paste0(", ", qc_label(primary_lane$Y), ",") else "",
+                           " measured). Continuous variables are mean +/- SD, ",
+                           "categorical are n (%).")) %>%
     kable_styling(full_width = FALSE)
 } else skip_note("qc/table_s1_characteristics-mesa.csv")
 ```
@@ -799,13 +881,15 @@ the simulation predicts that the GxM test is least specific exactly there.
 if (have(gxe)) {
   gxe_tbl <- gxe %>%
     filter(!is.na(est)) %>%
+    { if ("lane_id" %in% names(.) && !is.null(lanes_all))
+        left_join(., select(lanes_all, lane_id, Lane = label), by = "lane_id") else . } %>%
     { if (!is.null(variants_of_interest))
         left_join(., select(variants_of_interest, G = cpaid, rsid, gene, analysis),
                   by = "G") else . } %>%
     mutate(Outcome = relabel(Y, outcome_labels),
            Exposure = relabel(E, exposure_labels)) %>%
     arrange(p) %>%
-    select(any_of(c("Outcome", "Exposure", "rsid", "gene", "analysis")),
+    select(any_of(c("Lane", "Outcome", "Exposure", "rsid", "gene", "analysis")),
            beta_GxE = est, se, p, n) %>%
     mutate(across(c(beta_GxE, se), ~ signif(.x, 3)), p = signif(p, 3))
 
@@ -860,21 +944,22 @@ if (have(gxm_all)) {
   screen_summary <- gxm_annot %>%
     { if (!is.null(variants_of_interest))
         left_join(., select(variants_of_interest, G = cpaid, rsid, gene), by = "G") else . } %>%
-    group_by(across(any_of(c("rsid", "gene"))), Y, E) %>%
+    anchor_label() %>%
+    group_by(Lane = anchor, across(any_of(c("rsid", "gene"))), Y, E) %>%
     summarise(`Metabolites tested` = n(),
               `Hits` = sum(hit),
               `Min p` = signif(min(p, na.rm = TRUE), 3),
               .groups = "drop") %>%
     mutate(Outcome = relabel(Y, outcome_labels),
            Exposure = relabel(E, exposure_labels)) %>%
-    select(any_of(c("rsid", "gene")), Outcome, Exposure,
+    select(Lane, any_of(c("rsid", "gene")), Outcome, Exposure,
            `Metabolites tested`, Hits, `Min p`) %>%
     arrange(desc(Hits))
 
   write_csv(screen_summary, "output/manuscript/screen_summary.csv")
 
   screen_summary %>%
-    kable(caption = "Metabolome-wide screen: hits per anchor") %>%
+    kable(caption = "Metabolome-wide screen: hits per lane") %>%
     kable_styling(full_width = FALSE)
 } else cat("GxM_results.csv not available - skipping.\n")
 ```
@@ -931,10 +1016,12 @@ if (have(gxm_all) && "Method" %in% names(gxm_annot)) {
 ```{r signif-hits-table}
 if (have(signif_gxm)) {
   hits_tbl <- signif_gxm %>%
+    { if (!("label" %in% names(.)) && "lane_id" %in% names(.) && !is.null(lanes_all))
+        left_join(., select(lanes_all, lane_id, label), by = "lane_id") else . } %>%   # Hits written before lanes.
     mutate(Outcome = relabel(Y, outcome_labels),
            Exposure = relabel(E, exposure_labels)) %>%
     arrange(p) %>%
-    select(any_of(c("rsid", "gene")), Outcome, Exposure,
+    select(any_of(c(Lane = "label", "rsid", "gene")), Outcome, Exposure,
            Metabolite = met_label, any_of(c("HMDB_ID", "Method", "MZ", "RT")),
            beta_GxM, se, p) %>%
     mutate(across(any_of(c("MZ")), ~ signif(.x, 6)),
