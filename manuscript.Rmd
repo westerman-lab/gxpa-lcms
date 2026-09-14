@@ -146,7 +146,6 @@ qc_files <- c(
   "metabolomics_method_coverage-mesa.csv" = "Coverage by LC-MS method",
   "imputation_ledger-mesa.csv"            = "Imputation counts, per variable per exam",
   "variable_distributions-mesa.csv"       = "Exposure/outcome distributions by exam",
-  "lipid_medication-mesa.csv"             = "Lipid-lowering medication",
   "icc-mesa.csv"                          = "Within-person ICC, phenotypes",
   "metabolite_icc-mesa.csv"               = "Within-person ICC, per metabolite",
   "metabolite_icc_summary-mesa.csv"       = "Within-person ICC, per LC-MS method",
@@ -199,8 +198,12 @@ skip_note <- function(...) cat("Not available (", paste(c(...), collapse = ", ")
 # Read from the notebook's own analysis_params.csv when available, so the two
 # cannot drift apart; otherwise fall back to the value 02b last reported.
 params <- read_result("analysis_params.csv")
-N_EFF_METABOLITES <- if (have(params)) params$n_eff_metabolites[1] else 68.7
+N_EFF_METABOLITES <- if (have(params)) params$n_eff_metabolites[1] else 1217   # Li & Ji.
 p_thresh_mwas     <- if (have(params)) params$p_thresh_mwas[1]     else 0.05 / N_EFF_METABOLITES
+# analysis_params.csv written before the switch to Li & Ji has no estimator column; those
+# files used the participation ratio.
+M_EFF_ESTIMATOR   <- if (have(params) && "m_eff_estimator" %in% names(params)) params$m_eff_estimator[1] else
+                     if (have(params)) "participation ratio" else "Li & Ji (2005)"
 threshold_source  <- if (have(params)) "read from analysis_params.csv" else "fallback default"
 
 # Readable labels for outcomes and exposures.
@@ -227,6 +230,15 @@ qc_var_labels <- c(
   insulin = "Insulin")
 
 qc_label <- function(x) relabel(x, qc_var_labels)
+
+# Harmonised in 01c but not analysed from 02a on, so kept out of every table and figure
+# here even though 01c's QC exports still carry them.
+not_analysed <- c("fg", "hb")
+
+# Phenotype ICCs not shown: the other PA scales (MVPA is modelled as mvpa_wins), and
+# traits no lane uses.
+icc_not_shown <- c(not_analysed, "mvpa", "mvpa_log", "mvpa_trunc", "pa", "mod_pa", "vig_pa",
+                   "tg_log", "ses_score")
 
 qc_quantity_labels <- c(feature_missingness = "Missingness per feature",
                         sample_missingness  = "Missingness per sample",
@@ -332,9 +344,13 @@ signif_gxm <- in_scope(signif_gxm)      # hit selection is per-row, so filtering
 y_g        <- keep_pairs(y_g, "Y", "G")
 e_g        <- keep_pairs(e_g, "E", "G")
 m_e        <- if (have(signif_gxm) && have(m_e)) {
-                keys <- if (all(c("lane_id") %in% names(m_e)) && "lane_id" %in% names(signif_gxm))
-                          c("lane_id", "M") else c("M", "E")
-                semi_join(m_e, distinct(select(signif_gxm, all_of(keys))), by = keys)
+                if ("lane_id" %in% names(m_e) && "lane_id" %in% names(signif_gxm)) {
+                  semi_join(m_e, distinct(select(signif_gxm, lane_id, M)), by = c("lane_id", "M"))
+                } else {                        # M_E.csv written before lane_id: match by trait.
+                  m_e %>% mutate(.et = trait(E)) %>%
+                    semi_join(distinct(transmute(signif_gxm, M, .et = trait(E))), by = c("M", ".et")) %>%
+                    select(-.et)
+                }
               } else m_e
 ```
 
@@ -369,8 +385,8 @@ if (!is.null(lanes_all)) {
 }
 ```
 
-Screen-wide significance threshold: **p < `r signif(p_thresh_mwas, 3)`**
-(Bonferroni over `r signif(N_EFF_METABOLITES, 4)` effective metabolites;
+Screen-wide significance threshold: **p < `r format(signif(p_thresh_mwas, 3), scientific = TRUE)`**
+(Bonferroni over `r signif(N_EFF_METABOLITES, 4)` effective metabolites, `r M_EFF_ESTIMATOR`;
 `r threshold_source`). Note that this corrects across metabolites **within a lane**,
 not across the `r if (!is.null(lanes_all)) nrow(lanes_all) else "declared"` lanes,
 each of which screens the same metabolome. Whether to also correct across lanes -- or
@@ -447,7 +463,7 @@ if (have(qc$metabolomics_method_coverage)) {
 ```{r qc-imputation}
 if (have(qc$imputation_ledger)) {
   imp_tbl <- qc$imputation_ledger %>%
-    filter(exam == "all", n_missing_before > 0) %>%
+    filter(exam == "all", n_missing_before > 0, !variable %in% not_analysed) %>%
     arrange(desc(n_missing_before)) %>%
     select(Variable = variable, Imputation = imputation, Rows = n_rows,
            Missing = n_missing_before, `% missing` = frac_missing_before,
@@ -465,81 +481,22 @@ if (have(qc$imputation_ledger)) {
 } else skip_note("qc/imputation_ledger-mesa.csv")
 ```
 
-```{r qc-imputation-by-exam, fig.asp = 0.5}
-if (have(qc$imputation_ledger)) {
-  qc$imputation_ledger %>%
-    filter(exam != "all") %>%
-    ggplot(aes(x = exam, y = reorder(qc_label(variable), n_missing_before),
-               fill = 100 * frac_missing_before)) +
-    geom_tile() +
-    scale_fill_viridis_c(name = "% missing\nbefore imputation", option = "magma",
-                         direction = -1) +
-    labs(x = "MESA exam", y = NULL)
-}
-```
-
 ## Exposure, outcome and covariate distributions
 
 ```{r qc-mvpa-transforms}
 if (have(qc$variable_distributions)) {
   qc$variable_distributions %>%
-    filter(grepl("^mvpa", variable)) %>%
+    filter(grepl("^mvpa", variable), exam == "all") %>%     # Pooled over exams.
     mutate(variable = qc_label(variable)) %>%
-    select(Variable = variable, Exam = exam, n, `% zero` = n_zero, Mean = mean,
+    select(Variable = variable, n, `% zero` = n_zero, Mean = mean,
            SD = sd, Min = min, P25 = p25, Median = median, P75 = p75, Max = max) %>%
     mutate(`% zero` = signif(100 * `% zero` / n, 3),
            across(c(Mean, SD, Min, P25, Median, P75, Max), ~ signif(.x, 3))) %>%
-    kable(caption = paste("MVPA under each transformation 02a compared. `mvpa_wins` is",
+    kable(caption = paste("MVPA under each transformation 02a compared, pooled over exams. `mvpa_wins` is",
                           "the one the models use: winsorized at the 90th percentile,",
                           "which is what moves the maximum.")) %>%
     kable_styling(full_width = FALSE)
 } else skip_note("qc/variable_distributions-mesa.csv")
-```
-
-```{r qc-distributions-by-exam, fig.asp = 0.55}
-if (have(qc$variable_distributions)) {
-  qc$variable_distributions %>%
-    filter(exam != "all",
-           variable %in% c("hdl", "hdl_log", "tg", "bmi", "bmi_covariate", "age", "mvpa", "mvpa_wins", "fg")) %>%
-    mutate(exam = factor(exam), variable = qc_label(variable)) %>%
-    ggplot(aes(x = exam, y = median)) +
-    geom_pointrange(aes(ymin = p25, ymax = p75), size = 0.3) +
-    geom_linerange(aes(ymin = p05, ymax = p95), alpha = 0.35) +
-    facet_wrap(vars(variable), scales = "free_y") +
-    labs(x = "MESA exam", y = "Median (P25-P75, P05-P95)",
-         caption = paste("A step in HDL across exams would be assay or secular drift",
-                         "rather than biology; MVPA is absent at exam 4."))
-}
-```
-
-Lipid-lowering medication is reported here for context, **not** as an adjustment,
-and HDL-C is deliberately left uncorrected. The convention (GLGC and essentially
-every large lipid GWAS since) corrects TC and LDL-C for treatment and leaves HDL-C
-and TG alone: the statin effect on LDL-C is large and consistent enough to justify a
-single divisor, while its effect on HDL-C is a few percent and varies by drug and
-dose, so a correction factor would add more error than it removes. Adjusting for
-medication as a *covariate* would be worse still -- treatment is prescribed in
-response to lipid levels, so it is a descendant of the outcome, and conditioning on
-it risks collider bias in exactly the E -> Y slope the interaction models are about.
-
-The table is useful in two other ways: as the denominator for a sensitivity analysis
-refitting the hits with treated participants excluded, and as a flag on the
-metabolite side, where statins do have a detectable signature and a GxM hit on a
-statin-responsive feature would be worth a second look.
-
-```{r qc-lipid-meds}
-if (have(qc$lipid_medication)) {
-  qc$lipid_medication %>%
-    mutate(`%` = signif(100 * frac, 3)) %>%
-    select(Variable = variable, Value = value, Participants = n_participants, `%`) %>%
-    kable(caption = paste("Lipid-lowering medication prevalence. Reported for context;",
-                          "no lipid trait in this pipeline is medication-corrected.")) %>%
-    kable_styling(full_width = FALSE)
-} else {
-  cat("No lipid-medication summary in results/qc/. 01c writes an empty table when the",
-      "PIC-SURE pull in 00 returned no such column - add one there if the report",
-      "should carry this.\n")
-}
 ```
 
 ## Within-person reliability (ICC)
@@ -559,7 +516,7 @@ if (have(qc$icc) || have(qc$metabolite_icc_summary)) {
   # metabolites are a distribution over features, and they share the y axis.
   icc_panel <- bind_rows(
     if (have(qc$icc))
-      qc$icc %>% arrange(desc(icc)) %>%
+      qc$icc %>% filter(!variable %in% icc_not_shown) %>% arrange(desc(icc)) %>%
         transmute(label = qc_label(variable), kind = "Phenotype", point = icc) else NULL,
     if (have(qc$metabolite_icc_summary))
       qc$metabolite_icc_summary %>%
@@ -581,13 +538,15 @@ if (have(qc$icc) || have(qc$metabolite_icc_summary)) {
     labs(x = NULL, y = "ICC across exams",
          caption = paste("Dashed line: the ICC = 0.5 the simulation assumes.",
                          "Boxes are the P25-P75 of the per-feature ICCs, whiskers P05-P95.")) +
-    theme(axis.text.x = element_text(angle = 35, hjust = 0.9))
+    scale_x_discrete(labels = scales::label_wrap(11)) +
+    theme(axis.text.x = element_text(angle = 0, hjust = 0.5))
 } else skip_note("qc/icc-mesa.csv", "qc/metabolite_icc_summary-mesa.csv")
 ```
 
 ```{r qc-icc-table}
 if (have(qc$icc)) {
   icc_tbl <- qc$icc %>%
+    filter(!variable %in% icc_not_shown) %>%
     arrange(desc(icc)) %>%
     mutate(variable = qc_label(variable)) %>%
     select(Variable = variable, Participants = n_individuals,
@@ -628,17 +587,20 @@ if (have(qc$metabolite_icc) && have(signif_gxm)) {
 
 ## Covariate justification
 
-```{r qc-covariate-ladder, fig.asp = 0.5}
+```{r qc-covariate-ladder, fig.asp = 0.6}
 if (have(qc$covariate_ladder)) {
   qc$covariate_ladder %>%
     filter(outcome %in% (if (!is.null(anchors)) anchors$Y else "hdl_log"),
-           !grepl("^chr", variable)) %>%
+           !grepl("^chr", variable),
+           # +bmi repeats the rung before it when BMI is already the outcome or the variable.
+           !(covar_set == "+bmi" & (trait(outcome) == "bmi" | trait(variable) == "bmi"))) %>%
     mutate(covar_set = fct_inorder(covar_set), variable = qc_label(variable),
            outcome = qc_label(outcome)) %>%
     ggplot(aes(x = covar_set, y = estimate, color = covar_set)) +
     geom_hline(yintercept = 0, color = "gray70") +
     geom_pointrange(aes(ymin = l95, ymax = u95), size = 0.3) +
-    facet_wrap(vars(outcome, variable), scales = "free_y") +
+    facet_wrap(vars(outcome, variable), scales = "free_y",
+               labeller = label_wrap_gen(width = 28, multi_line = TRUE)) +
     scale_x_discrete(labels = NULL, breaks = NULL) +
     labs(x = NULL, y = "Standardised estimate",
          color = "Covariate set",
@@ -646,21 +608,25 @@ if (have(qc$covariate_ladder)) {
 } else skip_note("qc/covariate_ladder-mesa.csv")
 ```
 
-```{r qc-variance-explained}
+```{r qc-variance-explained, fig.asp = 0.45}
 if (have(qc$covariate_variance_explained)) {
-  ve_tbl <- qc$covariate_variance_explained %>%
-    mutate(outcome = qc_label(outcome),
-           across(c(r2, adj_r2, delta_adj_r2), ~ signif(.x, 3))) %>%
-    select(Outcome = outcome, `Covariate set` = covar_set, n, Terms = n_terms,
-           `R2` = r2, `Adj. R2` = adj_r2, `Delta adj. R2` = delta_adj_r2)
+  ve <- qc$covariate_variance_explained %>%
+    filter(!(covar_set == "+bmi" & trait(outcome) == "bmi"),     # A no-op rung for BMI itself.
+           outcome %in% (if (!is.null(anchors)) c(anchors$Y, anchors$E) else outcome)) %>%
+    # Levels from the whole file: an outcome that skips a rung would otherwise reorder them.
+    mutate(covar_set = factor(covar_set, levels = unique(qc$covariate_variance_explained$covar_set)),
+           outcome = qc_label(outcome))
 
-  write_csv(ve_tbl, "output/manuscript/qc_covariate_variance_explained.csv")
+  write_csv(ve, "output/manuscript/qc_covariate_variance_explained.csv")
 
-  ve_tbl %>%
-    kable(caption = paste("Variance explained by each covariate set. All sets are fitted",
-                          "on the same complete-case rows, so the rungs are comparable;",
-                          "the delta column is the gain from adding that rung.")) %>%
-    kable_styling(full_width = FALSE)
+  ggplot(ve, aes(x = covar_set, y = adj_r2, color = outcome, group = outcome)) +
+    geom_line() +
+    geom_point(size = 1.8) +
+    scale_color_discrete(labels = scales::label_wrap(30)) +
+    labs(x = "Covariate set (cumulative; -race drops race but keeps gPCs)",
+         y = expression("Adjusted " * R^2), color = NULL,
+         caption = "All rungs fitted on the same complete-case rows, so they are comparable.") +
+    theme(axis.text.x = element_text(angle = 35, hjust = 0.9), legend.position = "right")
 } else skip_note("qc/covariate_variance_explained-mesa.csv")
 ```
 
@@ -671,6 +637,7 @@ statement about that subset rather than about the whole analysis sample.
 ```{r qc-mpc-heatmap, fig.asp = 0.6}
 if (have(qc$mpc_covariate_pvalues)) {
   qc$mpc_covariate_pvalues %>%
+    filter(as.integer(sub("mPC", "", mPC)) <= 15) %>%            # 02a's own heatmap shows 15.
     mutate(mPC = factor(mPC, levels = paste0("mPC", 1:100)),
            nlp = pmin(-log10(p), 10)) %>%
     ggplot(aes(x = mPC, y = fct_rev(fct_inorder(covariate)), fill = nlp)) +
@@ -754,10 +721,10 @@ if (have(qc$m_eff_estimators)) {
     kable(caption = paste("Effective number of independent metabolites under several",
                           "estimators, over", qc$m_eff_estimators$n_features[1],
                           "features in", qc$m_eff_estimators$n_samples[1],
-                          "samples with complete data on all four methods. The choice",
-                          "of estimator moves the threshold by more than an order of",
-                          "magnitude, which is why it is reported here rather than",
-                          "asserted.")) %>%
+                          "samples with complete data on all four methods. The screen",
+                          "uses Li & Ji; the simulated max statistic is the threshold that",
+                          "holds the family-wise error at 0.05 directly, assuming the GxM",
+                          "statistics are correlated as the features are.")) %>%
     kable_styling(full_width = FALSE)
 } else skip_note("qc/m_eff_estimators-mesa.csv")
 ```
@@ -776,7 +743,7 @@ if (have(qc$metabolite_eigenvalues)) {
   p_cum <- spec %>%
     ggplot(aes(x = component, y = cum_var_explained)) +
     geom_line() +
-    geom_hline(yintercept = c(0.95, 0.99), linetype = "dashed", color = "gray50") +
+    geom_hline(yintercept = 0.995, linetype = "dashed", color = "gray50") +   # simpleM.
     { if (have(qc$m_eff_estimators))
         geom_vline(data = filter(qc$m_eff_estimators, in_use),
                    aes(xintercept = m_eff), color = "firebrick") } +
@@ -793,7 +760,17 @@ if (have(qc$metabolite_eigenvalues)) {
 ```{r qc-genotype}
 if (have(qc$genotype_qc)) {
   geno_tbl <- qc$genotype_qc %>%
-    { if (!is.null(anchors)) filter(., cpaid %in% anchors$G | rsid %in% anchors$rsid) else . } %>%
+    { if (!is.null(lanes_all)) filter(., cpaid %in% lanes_all$G) %>%
+        left_join(distinct(select(lanes_all, cpaid = G, .gene = gene, .rsid = rsid)), by = "cpaid") %>%
+        mutate(gene = coalesce(na_if(gene, ""), .gene), rsid = coalesce(na_if(rsid, ""), .rsid)) %>%
+        select(-.gene, -.rsid) else . } %>%
+    # 01b names each dosage column chr_pos_ref_alt and polarizes it to count that alt, so
+    # the counted allele is the cpaid's last field. An older 01b export joined its
+    # annotation on a cpaid that no longer matched, and recorded the allele as undefined.
+    mutate(.alt = sub(".*_", "", cpaid),
+           counted_allele = ifelse(grepl("^UNDEFINED", counted_allele) & nzchar(.alt),
+                                   paste0("alt = ", .alt), counted_allele)) %>%
+    select(-.alt) %>%
     mutate(across(c(alt_freq, maf, call_rate), ~ signif(.x, 3))) %>%
     select(any_of(c("gene", "rsid", "cpaid")), `Counted allele` = counted_allele,
            `Freq (counted)` = alt_freq, MAF = maf, Called = n_called,
@@ -802,7 +779,7 @@ if (have(qc$genotype_qc)) {
   write_csv(geno_tbl, "output/manuscript/qc_genotype.csv")
 
   geno_tbl %>%
-    kable(caption = paste("Call rate and dosage polarity for the reported anchors.",
+    kable(caption = paste("Call rate and dosage polarity for every declared lane's SNP.",
                           "01b re-polarizes a flipped variant so every dosage counts the",
                           "allele named in its `cpaid`; a variant whose counted allele is",
                           "undefined has no named alt in variants_of_interest.csv, and",
@@ -814,7 +791,7 @@ if (have(qc$genotype_qc)) {
 ```{r qc-genotype-by-race}
 if (have(qc$genotype_by_race)) {
   qc$genotype_by_race %>%
-    { if (!is.null(anchors)) filter(., variant %in% anchors$G) else . } %>%
+    { if (!is.null(lanes_all)) filter(., variant %in% lanes_all$G, !is.na(race)) else . } %>%
     mutate(across(c(freq_counted, maf, call_rate), ~ signif(.x, 3))) %>%
     select(Variant = variant, Race = race, Participants = n_participants,
            Called = n_called, `Freq (counted)` = freq_counted, MAF = maf,
@@ -884,12 +861,12 @@ if (have(gxe)) {
     { if ("lane_id" %in% names(.) && !is.null(lanes_all))
         left_join(., select(lanes_all, lane_id, Lane = label), by = "lane_id") else . } %>%
     { if (!is.null(variants_of_interest))
-        left_join(., select(variants_of_interest, G = cpaid, rsid, gene, analysis),
+        left_join(., select(variants_of_interest, G = cpaid, rsid, gene),
                   by = "G") else . } %>%
     mutate(Outcome = relabel(Y, outcome_labels),
            Exposure = relabel(E, exposure_labels)) %>%
     arrange(p) %>%
-    select(any_of(c("Lane", "Outcome", "Exposure", "rsid", "gene", "analysis")),
+    select(any_of(c("Lane", "Outcome", "Exposure", "rsid", "gene")),
            beta_GxE = est, se, p, n) %>%
     mutate(across(c(beta_GxE, se), ~ signif(.x, 3)), p = signif(p, 3))
 
@@ -1074,20 +1051,21 @@ if (have(signif_gxm) && have(gxe)) {
 } else cat("Need both mesa_signif_GxMs.csv and GxE.csv - skipping.\n")
 ```
 
-```{r dilution-check, fig.asp = 0.5}
+```{r dilution-check, fig.asp = 0.5, results = 'asis'}
 # Quantitative test of the conceptual model: predicted beta_GxE = alpha * beta_GxM,
 # where alpha is the standardised M ~ E coefficient. Deviations are informative --
 # they bound how much of the GxE signal the exposure can carry at all.
 if (have(signif_gxm) && have(gxe) && have(m_e)) {
   alpha_df <- m_e %>%
     filter(!is.na(est)) %>%
-    select(M, E, alpha = est, alpha_se = se, alpha_p = p) %>%
-    distinct(M, E, .keep_all = TRUE)  # One alpha per (metabolite, exposure); guards the join below.
+    transmute(M, .et = trait(E), alpha = est, alpha_se = se, alpha_p = p) %>%
+    distinct(M, .et, .keep_all = TRUE)  # One alpha per (metabolite, exposure trait); guards the join below.
 
   dilution <- signif_gxm %>%
-    inner_join(select(filter(gxe, !is.na(est)), Y, E, G, beta_GxE = est),
-               by = c("Y", "E", "G")) %>%
-    inner_join(alpha_df, by = c("M", "E")) %>%
+    inner_join(select(filter(gxe, !is.na(est)), lane_id, beta_GxE = est),
+               by = "lane_id") %>%
+    mutate(.et = trait(E)) %>%
+    inner_join(alpha_df, by = c("M", ".et")) %>%
     mutate(predicted_GxE = alpha * beta_GxM,
            Outcome = relabel(Y, outcome_labels),
            Exposure = relabel(E, exposure_labels))
@@ -1102,12 +1080,14 @@ if (have(signif_gxm) && have(gxe) && have(m_e)) {
 
     write_csv(dil_tbl, "output/manuscript/dilution_check.csv")
 
+    cat("\n\n")
     print(kable_styling(kable(
       dil_tbl,
       caption = paste("Dilution check: is the observed GxE consistent with",
                       "alpha * beta_GxM? alpha is the standardised metabolite-exposure",
                       "coupling, so a small alpha implies the exposure can only ever",
                       "carry a fraction of the interaction."))))
+    cat("\n\n")
 
     dilution %>%
       ggplot(aes(x = predicted_GxE, y = beta_GxE)) +
@@ -1138,8 +1118,10 @@ if (have(m_e)) {
     { if (have(met_info) && !("met_label" %in% names(.)))
         left_join(., select(met_info, M = unique_met_id, met_label), by = "M") else . } %>%
     mutate(Exposure = relabel(E, exposure_labels)) %>%
+    # any_of() on both names would keep both, as Metabolite1/Metabolite2; M is the fallback.
+    mutate(Metabolite = if ("met_label" %in% names(.)) coalesce(met_label, M) else M) %>%
     arrange(p) %>%
-    select(Metabolite = any_of(c("met_label", "M")), Exposure,
+    select(Metabolite, Exposure,
            beta_E = est, se, p, n) %>%
     mutate(across(c(beta_E, se), ~ signif(.x, 3)), p = signif(p, 3))
 
@@ -1202,9 +1184,9 @@ if (have(gxc)) {
     { if (!is.null(variants_of_interest))
         left_join(., select(variants_of_interest, G = cpaid, rsid, gene), by = "G") else . } %>%
     mutate(Outcome = relabel(Y, outcome_labels)) %>%
+    mutate(Metabolite = if ("met_label" %in% names(.)) coalesce(met_label, M) else M) %>%
     arrange(p) %>%
-    select(any_of(c("rsid", "gene")), Outcome,
-           Metabolite = any_of(c("met_label", "M")),
+    select(any_of(c("rsid", "gene")), Outcome, Metabolite,
            beta_GxM_adj = est, se, p) %>%
     mutate(across(where(is.numeric), ~ signif(.x, 3)))
 
@@ -1221,10 +1203,10 @@ if (have(gxc)) {
 ```{r attenuation-comparison}
 if (have(gxc) && have(signif_gxm)) {
   atten <- signif_gxm %>%
-    select(Y, E, G, M, met_label, beta_primary = beta_GxM, p_primary = p) %>%
-    inner_join(select(filter(gxc, !is.na(est)), Y, E, G, M,
-                      beta_adj = est, p_adj = p),
-               by = c("Y", "E", "G", "M")) %>%
+    select(lane_id, M, met_label, beta_primary = beta_GxM, p_primary = p) %>%
+    inner_join(select(filter(gxc, !is.na(est)), lane_id, M,     # By lane, not (Y, E, G), so an
+                      beta_adj = est, p_adj = p),               # older file's E = bmi still joins.
+               by = c("lane_id", "M")) %>%
     mutate(`% attenuation` = 100 * (1 - beta_adj / beta_primary)) %>%
     arrange(p_primary) %>%
     select(Metabolite = met_label, beta_primary, beta_adj,
@@ -1373,7 +1355,7 @@ build_dag <- function(which_scenarios) {
     theme(legend.position = "none",
           strip.text    = element_text(face = "bold"),
           panel.spacing = unit(0.2, "lines"),
-          plot.margin   = margin(2, 2, 2, 2))
+          plot.margin   = margin(10, 2, 2, 2))   # Room for the strip title in the combined figure.
 }
 
 dag_all <- build_dag(c("A", "B", "C", "D"))
@@ -1419,6 +1401,7 @@ if (have(sim_power_z)) {
       coord_equal() +
       labs(x = "GxM z (unadjusted)", y = "GxM z (G:E-adjusted)",
            subtitle = z_subtitle) +
+      guides(color = guide_legend(nrow = 1, title.position = "top")) +   # Else clipped in the combined figure.
       theme(legend.position = "bottom")
   print(power_z_panel)
 } else cat("results/simulation/power_z_replicates.csv not available - skipping.\n")
@@ -1523,7 +1506,8 @@ if (have(sim_icc)) {
            ICC_M_label = factor(sprintf("ICC[M] == %.2f", ICC_M)))
 
   print(sim_curve(dat, beta_GxM, expression(paste("True ", beta[GxM]))) +
-          facet_grid(ICC_E_label ~ ICC_M_label, labeller = label_parsed))
+          facet_grid(ICC_E_label ~ ICC_M_label, labeller = label_parsed) +
+          scale_x_continuous(breaks = c(0, 0.1, 0.2)))   # Five breaks collide across facets.
 } else cat("results/simulation/icc_grid_summary.csv not available - skipping.\n")
 ```
 
