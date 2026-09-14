@@ -1,0 +1,476 @@
+---
+title: "Design audit: can the MESA GxM screen say anything under design-only restrictions?"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+params:
+  results_dir: null
+knit: (function(input, ...) rmarkdown::render(input, output_dir = "output/exploration", envir = globalenv()))
+---
+
+<!--
+Render from scripts/ with
+  rmarkdown::render("exploration.Rmd", output_dir = "output/exploration")
+Read-only on results/: every table and figure it produces goes to output/exploration/,
+prefixed exp_. It fits no model. It is NOT manuscript.Rmd and must never feed it.
+-->
+
+<div style="border: 2px solid #b35806; background: #fff5eb; padding: 12px 16px; margin: 12px 0;">
+**Scoping exercise, not a results-generating analysis.** This report audits the design of
+the MESA metabolome-wide interaction screen using fitted results only; nothing here fits a
+model, and nothing here is a finding.
+
+**Pre-committed primary analysis: D2, the annotated-feature restriction, at the corrected
+M_eff (one third of the features tested).** It was fixed on interpretability grounds before
+this report was first run (section 8). Every other design below is a sensitivity surface,
+reported without designating a retrospective winner.
+</div>
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, dpi = 200,
+                      fig.path = "output/exploration/exp_")
+suppressMessages(silent <- lapply(
+  c("knitr", "kableExtra", "tidyverse", "patchwork"), library, character.only = TRUE))
+select <- dplyr::select
+theme_set(theme_bw())
+
+out_dir <- "output/exploration"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+write_exp <- function(x, name) {                  # The only writer in this report.
+  write_csv(x, file.path(out_dir, paste0("exp_", name, ".csv")))
+  invisible(x)
+}
+```
+
+```{r parameters}
+# Everything the audit can be tuned by, in one place.
+P <- list(
+  alpha_fwer     = 0.05,
+  meff_ratio     = 1/3,     # M_eff = meff_ratio x features in the design: a single approximation.
+  meff_reference = 67.77,   # The participation ratio the pipeline used until 2026-09-14; D0 only.
+  fdr_levels     = c(0.05, 0.10, 0.20),
+  em_p_cutoffs   = c(none = 1, lenient = 0.10, nominal = 0.05),
+  icc_cutoffs    = c(none = 0, low = 0.30, moderate = 0.50),
+  cv_cutoffs     = c(none = Inf, standard = 0.30),
+  icc_m_assumed  = 0.50,    # The ICC_M the simulation (Supp. Fig. S2) assumes.
+  power          = 0.80,    # For the minimum detectable effect.
+  anchors        = NULL     # lane_ids to audit; NULL = every lane declared in anchors.csv.
+)
+```
+
+# 8. Decision rule (fixed before this report was run)
+
+**Pre-committed primary: D2**, the annotated-feature restriction, at the corrected M_eff.
+The justification stands independently of any result in this report: the current applied
+section cannot name a single one of its hits, and no molecular participant can be
+nominated from an unannotated feature. Everything else in section 6B is a sensitivity
+surface, reported without designating a retrospective winner.
+
+Every restriction examined here is computable without reference to Y (G, E, M, covariates
+and feature metadata only), which keeps it an independent filter in the sense of Bourgon,
+Gentleman & Huber (2010) and leaves the conditional null of the GxM statistic unchanged.
+Running all filters and then adopting whichever produces hits would be selection on Y x G
+and would void that guarantee; the commitment above is the mitigation.
+
+*Methods language to carry forward:* the annotated restriction was specified on
+interpretability grounds prior to examining the filtered results; all filters used are
+functions of the design only (G, E, M, covariates, feature metadata) and involve no
+outcome data; and threshold sensitivity is shown as hits against the full range of
+thresholds rather than at a single estimate.
+
+# Inputs
+
+```{r inputs}
+results_dir <- params$results_dir %||%
+  (c("results", "../results") %>% keep(dir.exists) %>% pluck(1, .default = "results"))
+
+input_log <- tibble(input = character(), path = character(), status = character())
+log_input <- function(input, path, status)
+  input_log <<- add_row(input_log, input = input, path = path, status = status)
+
+# anchors.csv: the copy the notebooks read (workspace bucket), else the repo copy.
+config_bucket <- Sys.getenv("WORKSPACE_BUCKET",
+                            unset = "gs://fc-secure-4a392455-5587-4d6f-b8bd-01a1f834ae63")
+read_config <- function(name) {
+  tmp <- file.path(tempdir(), name)
+  ok  <- system(paste("gcloud storage cp", shQuote(paste0(config_bucket, "/", name)), shQuote(tmp)),
+                ignore.stdout = TRUE, ignore.stderr = TRUE) == 0
+  if (ok) return(list(data = read_csv(tmp, show_col_types = FALSE), source = "workspace bucket"))
+  if (file.exists(name)) return(list(data = read_csv(name, show_col_types = FALSE), source = "repo copy"))
+  list(data = NULL, source = "not available")
+}
+anchors_cfg <- read_config("anchors.csv")
+if (is.null(anchors_cfg$data)) stop("anchors.csv is not available from the bucket or the repo.", call. = FALSE)
+lanes <- anchors_cfg$data %>% mutate(include = as.logical(include))
+if (!is.null(P$anchors)) lanes <- filter(lanes, lane_id %in% P$anchors)
+log_input("anchors.csv", anchors_cfg$source, paste(nrow(lanes), "lanes audited"))
+
+# Required inputs fail loudly; optional ones are logged and their pieces skipped.
+required <- c(gxm = "GxM_results.csv", gxe = "GxE.csv",
+              icc = "qc/metabolite_icc-mesa.csv", met_info = "met_info-mesa.csv",
+              setNames(paste0("M_E_mwide_", unique(lanes$E), ".csv"),
+                       paste0("em_", unique(lanes$E))))
+optional <- c(qc_cv = "qc/metabolite_qc_pool_cv-mesa.csv", aligned = "met_info-aligned.csv",
+              params = "analysis_params.csv")
+
+missing_req <- required[!file.exists(file.path(results_dir, required))]
+if (length(missing_req))
+  stop("Required input(s) missing from ", results_dir, ": ", paste(missing_req, collapse = ", "),
+       if (any(grepl("M_E_mwide", missing_req)))
+         ". The M_E_mwide files come from the metabolome-wide M~E chunk in 02b." else "",
+       call. = FALSE)
+
+rd <- function(f) read_csv(file.path(results_dir, f), show_col_types = FALSE, progress = FALSE) %>%
+  rename_with(~ gsub("β", "beta", .x))
+walk2(names(required), required, ~ log_input(.x, .y, "loaded"))
+opt <- map(optional, ~ if (file.exists(file.path(results_dir, .x))) rd(.x) else NULL)
+walk2(names(optional), optional, ~ log_input(.x, .y,
+  if (is.null(opt[[.x]])) "MISSING (optional) - dependent pieces skipped" else "loaded"))
+
+gxm_raw  <- rd(required[["gxm"]])
+if (!"lane_id" %in% names(gxm_raw))
+  stop("GxM_results.csv has no lane_id column; re-run 02b's display cells to attach it.", call. = FALSE)
+gxm_raw  <- filter(gxm_raw, lane_id %in% lanes$lane_id, !is.na(p))
+gxe      <- rd(required[["gxe"]]) %>% filter(lane_id %in% lanes$lane_id, !is.na(est))
+icc      <- rd(required[["icc"]])
+met_info <- rd(required[["met_info"]])
+em       <- map_dfr(required[grepl("^em_", names(required))], rd)
+
+tested <- unique(gxm_raw$M)
+
+# Feature-level design attributes: one row per tested feature, no outcome anywhere.
+aligned <- opt$aligned
+features <- met_info %>%
+  filter(unique_met_id %in% tested) %>%
+  transmute(M = unique_met_id, method = Method, MZ, RT, Metabolite, HMDB_ID,
+            annotated = !is.na(Metabolite) | !is.na(HMDB_ID)) %>%
+  left_join(select(icc, M = feature, icc), by = "M") %>%
+  { if (!is.null(opt$qc_cv)) left_join(., select(opt$qc_cv, M = feature, qc_cv = qc_pool_cv), by = "M")
+    else mutate(., qc_cv = NA_real_) } %>%
+  # FHS-alignable: C8/C18/HILIC map by ID (MESA ids carry an ionisation suffix the aligned
+  # ids do not); Amide-neg ids are positional in both datasets, so map it by name. This is
+  # membership in the aligned feature list BEFORE 03a's QC, not survival of it.
+  { if (!is.null(aligned)) mutate(., fhs_alignable = if_else(
+        method == "Amide-neg",
+        Metabolite %in% aligned$Metabolite[grepl("Amide", aligned$Method)],
+        sub("_(pos|neg)$", "", M) %in% aligned$unique_met_id))
+    else mutate(., fhs_alignable = NA) }
+
+# Every GxM row with its design attributes and its exposure-specific alpha.
+dat <- gxm_raw %>%
+  select(lane_id, Y, E, G, M, beta = est, se, p) %>%
+  left_join(features, by = "M") %>%
+  left_join(select(em, M = feature_id, E = exposure, alpha_hat, alpha_se = se, alpha_p = p),
+            by = c("M", "E")) %>%
+  left_join(select(lanes, lane_id, lane = label), by = "lane_id")
+
+input_log %>% kable(caption = paste("Inputs, from", results_dir)) %>% kable_styling(full_width = FALSE)
+write_exp(input_log, "input_log")
+
+tibble(`Features tested` = length(tested),
+       Annotated = sum(features$annotated),
+       `With ICC` = sum(!is.na(features$icc)),
+       `With QC-pool CV` = sum(!is.na(features$qc_cv)),
+       `FHS-alignable` = sum(features$fhs_alignable, na.rm = TRUE)) %>%
+  kable(caption = "Design attributes available per tested feature") %>% kable_styling(full_width = FALSE)
+```
+
+# 6A. Filter inventory
+
+```{r designs}
+em_lenient <- P$em_p_cutoffs[["lenient"]]
+cv_max     <- P$cv_cutoffs[["standard"]]
+
+designs <- tribble(
+  ~design, ~definition,                                     ~needs,
+  "D0",    "Full panel, M_eff = reference (current result)", NA,
+  "D1",    "Full panel, corrected M_eff",                   NA,
+  "D2",    "Annotated features only",                       NA,
+  "D3",    "D2 and QC-pool CV pass",                         "qc_cv",
+  "D4",    "D2 and E-associated (lenient)",                 NA,
+  "D5",    "FHS-alignable panel",                           "aligned",
+  "D6",    "D2 and FHS-alignable",                          "aligned") %>%
+  mutate(available = map_lgl(needs, ~ is.na(.x) || !is.null(opt[[.x]])),
+         primary   = design == "D2")
+
+in_design <- function(d, design) switch(design,
+  D0 = rep(TRUE, nrow(d)), D1 = rep(TRUE, nrow(d)),
+  D2 = d$annotated,
+  D3 = d$annotated & !is.na(d$qc_cv) & d$qc_cv <= cv_max,
+  D4 = d$annotated & !is.na(d$alpha_p) & d$alpha_p < em_lenient,
+  D5 = d$fhs_alignable %in% TRUE,
+  D6 = d$annotated & d$fhs_alignable %in% TRUE)
+
+# The design x anchor grid, carrying each cell's retained p-values.
+cells <- expand_grid(design = designs$design[designs$available], lane_id = lanes$lane_id) %>%
+  mutate(rows = map2(design, lane_id, \(ds, l) {
+    d <- filter(dat, lane_id == l)
+    d[in_design(d, ds), ]
+  })) %>%
+  mutate(n_features = map_int(rows, nrow),
+         m_eff      = if_else(design == "D0", P$meff_reference, P$meff_ratio * n_features),
+         threshold  = P$alpha_fwer / m_eff,
+         median_se  = map_dbl(rows, ~ median(.x$se)),
+         mde        = (qnorm(1 - threshold / 2) + qnorm(P$power)) * median_se,
+         hits       = map2_int(rows, threshold, ~ sum(.x$p < .y))) %>%
+  left_join(select(lanes, lane_id, lane = label), by = "lane_id") %>%
+  left_join(select(designs, design, definition, primary), by = "design")
+
+inventory <- cells %>%
+  group_by(lane_id) %>%
+  mutate(mde_vs_D1 = mde / mde[design == "D1"]) %>%
+  ungroup() %>%
+  transmute(Lane = lane, Design = design, Definition = definition,
+            Primary = if_else(primary, "yes", ""), Features = n_features,
+            M_eff = signif(m_eff, 4), `FWER threshold` = signif(threshold, 3),
+            `Median SE(beta_GxM)` = signif(median_se, 3),
+            `MDE (80% power)` = signif(mde, 3), `MDE / D1` = round(mde_vs_D1, 3))
+write_exp(inventory, "filter_inventory")
+
+if (any(!designs$available))
+  cat("Skipped (optional input missing):",
+      paste(designs$design[!designs$available], collapse = ", "), "\n\n")
+
+inventory %>%
+  kable(caption = paste0("Filter inventory. M_eff is ", round(P$meff_ratio, 3), " x the features ",
+                         "a design retains (D0: the reference value). MDE is the |beta_GxM| ",
+                         "detectable with ", 100 * P$power, "% power at the design's threshold, ",
+                         "from the lane's median SE over the retained features.")) %>%
+  kable_styling(full_width = FALSE) %>%
+  row_spec(which(inventory$Primary == "yes"), bold = TRUE)
+```
+
+# 6B. Hits surface
+
+```{r hits-table}
+bh_counts <- cells %>%
+  filter(design != "D0") %>%                     # BH does not depend on M_eff; D1 covers the panel.
+  mutate(q = map(rows, ~ p.adjust(.x$p, "BH"))) %>%
+  select(lane, design, q) %>%
+  expand_grid(fdr = P$fdr_levels) %>%
+  mutate(n = map2_int(q, fdr, ~ sum(.x <= .y))) %>%
+  select(-q) %>%
+  pivot_wider(names_from = fdr, values_from = n, names_prefix = "BH q<=")
+
+surface <- cells %>%
+  select(Lane = lane, Design = design, Primary = primary, Features = n_features,
+         `FWER threshold` = threshold, `FWER hits` = hits) %>%
+  mutate(Primary = if_else(Primary, "yes", ""), `FWER threshold` = signif(`FWER threshold`, 3)) %>%
+  left_join(rename(bh_counts, Lane = lane, Design = design), by = c("Lane", "Design"))
+write_exp(surface, "hits_surface")
+
+surface %>%
+  kable(caption = paste("Features passing, per design and lane: family-wise at the design's",
+                        "threshold, and Benjamini-Hochberg within the design's features.")) %>%
+  kable_styling(full_width = FALSE) %>%
+  row_spec(which(surface$Primary == "yes"), bold = TRUE)
+```
+
+```{r hits-curve, fig.width = 11, fig.asp = 0.45}
+grid_t <- 10^seq(-6, -2, length.out = 161)   # Where family-wise thresholds live.
+curve <- cells %>%
+  filter(design != "D0") %>%                     # Same features as D1; only the marked threshold differs.
+  mutate(curve = map(rows, \(r) tibble(threshold = grid_t,
+                                       hits = vapply(grid_t, \(t) sum(r$p < t), 0L)))) %>%
+  select(lane, design, primary, curve) %>%
+  unnest(curve)
+write_exp(curve, "hits_curve")
+
+marks <- bind_rows(
+  cells %>% filter(design == "D0") %>% transmute(lane, rule = "D0: reference M_eff", threshold),
+  cells %>% filter(design == "D1") %>% transmute(lane, rule = "D1: corrected M_eff", threshold),
+  if (!is.null(opt$params))
+    tibble(lane = unique(cells$lane),
+           rule = paste0("Pipeline now (", opt$params$m_eff_estimator[1] %||% "analysis_params", ")"),
+           threshold = opt$params$p_thresh_mwas[1]))
+
+ggplot(curve, aes(threshold, hits, color = design)) +
+  geom_vline(data = marks, aes(xintercept = threshold, linetype = rule), color = "grey30") +
+  geom_step(aes(linewidth = primary)) +
+  geom_point(data = filter(cells, design != "D0"), aes(threshold, hits, color = design), size = 2) +
+  scale_x_log10() +
+  scale_linewidth_manual(values = c(`FALSE` = 0.5, `TRUE` = 1.3), guide = "none") +
+  facet_wrap(vars(lane), scales = "free_y") +
+  labs(x = "Per-test p threshold (log scale)", y = "Features passing", color = "Design",
+       linetype = NULL,
+       caption = "Points: each design's own threshold. Thick line: the pre-committed primary (D2).") +
+  theme(legend.position = "bottom", legend.box = "vertical")
+```
+
+# 6C. Survivor table
+
+```{r survivors}
+survivors <- cells %>%
+  mutate(passing = map2(rows, threshold, ~ .x$M[.x$p < .y])) %>%
+  select(lane_id, design, passing) %>%
+  unnest(passing) %>%
+  group_by(lane_id, M = passing) %>%
+  summarise(designs = paste(sort(unique(design)), collapse = " "), .groups = "drop") %>%
+  left_join(dat %>% group_by(lane_id) %>%
+              mutate(q_full = p.adjust(p, "BH"),
+                     q_annotated = replace(rep(NA_real_, n()), annotated,
+                                           p.adjust(p[annotated], "BH"))) %>%
+              ungroup(), by = c("lane_id", "M")) %>%
+  left_join(select(gxe, lane_id, beta_GxE_observed = est), by = "lane_id") %>%
+  mutate(beta_GxE_implied = alpha_hat * beta) %>%
+  arrange(lane_id, p) %>%
+  transmute(Lane = lane, Feature = M, Metabolite, HMDB_ID, `Passes in` = designs,
+            beta_GxM = beta, SE = se, p, `BH q (full)` = q_full, `BH q (annotated)` = q_annotated,
+            alpha_hat, `p (alpha)` = alpha_p, ICC = icc, `QC-pool CV` = qc_cv,
+            `FHS-alignable` = fhs_alignable,
+            `Implied beta_GxE` = beta_GxE_implied, `Observed beta_GxE` = beta_GxE_observed)
+write_exp(survivors, "survivors")
+
+if (nrow(survivors)) {
+  survivors %>%
+    mutate(across(where(is.double), ~ signif(.x, 3))) %>%
+    kable(caption = paste("Every feature passing the family-wise threshold in any design.",
+                          "Implied beta_GxE is alpha_hat x beta_GxM (the dilution identity);",
+                          "the observed value is the lane's anchoring GxE.")) %>%
+    kable_styling(full_width = FALSE, font_size = 11) %>%
+    scroll_box(width = "100%")
+} else cat("No feature passes the family-wise threshold in any design.\n")
+```
+
+# 6D. Stratified calibration diagnostics
+
+A lambda that differs materially across strata is a calibration warning that outranks
+anything in 6B. Enrichment of small p among annotated features, relative to unannotated
+ones, would be design-level evidence that the restriction concentrates signal rather than
+merely reducing the test count.
+
+```{r calibration}
+lambda_gc <- function(p) median(qchisq(p, 1, lower.tail = FALSE)) / qchisq(0.5, 1)
+
+icc_breaks <- quantile(features$icc, c(0, 1/3, 2/3, 1), na.rm = TRUE)
+strat <- dat %>%
+  mutate(Annotation   = if_else(annotated, "annotated", "unannotated"),
+         `ICC tertile` = cut(icc, icc_breaks, include.lowest = TRUE,
+                             labels = c("low", "middle", "high")),
+         `E-M association` = cut(alpha_p, c(0, P$em_p_cutoffs[["nominal"]], P$em_p_cutoffs[["lenient"]], 1),
+                                 include.lowest = TRUE,
+                                 labels = c("p < 0.05", "0.05 <= p < 0.10", "p >= 0.10"))) %>%
+  pivot_longer(c(Annotation, `ICC tertile`, `E-M association`),
+               names_to = "stratification", values_to = "stratum",
+               values_transform = list(stratum = as.character)) %>%
+  filter(!is.na(stratum)) %>%
+  mutate(stratum = factor(stratum, levels = c("annotated", "unannotated", "low", "middle", "high",
+                                              "p < 0.05", "0.05 <= p < 0.10", "p >= 0.10")))
+
+lambdas <- bind_rows(
+  dat %>% group_by(lane) %>% summarise(stratification = "All", stratum = "all", n = n(),
+                                       lambda = lambda_gc(p), frac_p05 = mean(p < 0.05),
+                                       frac_p01 = mean(p < 0.01), .groups = "drop"),
+  strat %>% group_by(lane, stratification, stratum) %>%
+    summarise(n = n(), lambda = lambda_gc(p), frac_p05 = mean(p < 0.05),
+              frac_p01 = mean(p < 0.01), .groups = "drop"))
+write_exp(lambdas, "calibration_lambda")
+
+lambdas %>%
+  mutate(across(c(lambda, frac_p05, frac_p01), ~ round(.x, 3))) %>%
+  rename(Lane = lane, Stratification = stratification, Stratum = stratum,
+         `p < 0.05` = frac_p05, `p < 0.01` = frac_p01) %>%
+  kable(caption = "Genomic-control lambda and the share of small p, by stratum") %>%
+  kable_styling(full_width = FALSE)
+
+# The CETP lane came from a vQTL scan, so genotype-dependent variance is present by
+# construction and can inflate GxM statistics against any correlated feature.
+overall <- dat %>% group_by(lane_id) %>% summarise(lambda = lambda_gc(p))
+l_cetp <- overall$lambda[overall$lane_id == "cetp_bmi_hdl"]
+l_clasp <- overall$lambda[overall$lane_id == "clasp1_mvpa_hdl"]
+if (length(l_cetp) && length(l_clasp))
+  cat(sprintf("\n**CETP versus CLASP1:** lambda %.3f versus %.3f. %s\n", l_cetp, l_clasp,
+              if (l_cetp > l_clasp) paste("CETP exceeds CLASP1: settle robust or location-scale",
+                                          "inference before reading the hits surface.")
+              else "CETP does not exceed CLASP1."))
+```
+
+```{r qq, fig.width = 11, fig.asp = 1.0}
+qq_data <- strat %>%
+  group_by(lane, stratification, stratum) %>%
+  arrange(p, .by_group = TRUE) %>%
+  mutate(expected = -log10(ppoints(n())), observed = -log10(p)) %>%
+  ungroup()
+
+qq_panel <- function(s) ggplot(filter(qq_data, stratification == s), aes(expected, observed, color = stratum)) +
+  geom_abline(slope = 1, intercept = 0, color = "grey50", linetype = "dashed") +
+  geom_point(size = 0.6, alpha = 0.6) +
+  facet_wrap(vars(lane), nrow = 1) +
+  labs(x = expression("Expected " * -log[10](p)), y = expression("Observed " * -log[10](p)),
+       color = s) +
+  guides(color = guide_legend(override.aes = list(size = 2, alpha = 1)))
+
+wrap_plots(map(c("Annotation", "ICC tertile", "E-M association"), qq_panel), ncol = 1)
+```
+
+# 6E. Reliability as a diagnostic, not a filter
+
+ICC estimated from participant repeated measures mixes technical noise with genuine
+within-person biological change, and a metabolite that tracks a time-varying exposure has
+real within-person variance by construction. Filtering on high ICC therefore risks
+discarding the exposure-responsive features the framework is looking for, so QC-pool CV,
+which isolates technical variance, is the reliability filter (D3), and ICC is only
+described here.
+
+```{r icc-distribution, fig.asp = 0.4}
+ggplot(features, aes(icc)) +
+  geom_histogram(binwidth = 0.02, boundary = 0, fill = "grey70", color = "grey40") +
+  geom_vline(xintercept = P$icc_m_assumed, color = "firebrick", linetype = "dashed") +
+  facet_wrap(vars(annotated), labeller = labeller(annotated = c(`TRUE` = "Annotated",
+                                                               `FALSE` = "Unannotated"))) +
+  labs(x = "Within-person ICC across exams", y = "Features",
+       caption = paste0("Dashed line: the ICC_M = ", P$icc_m_assumed,
+                        " the simulation assumes (Supp. Fig. S2)."))
+```
+
+```{r icc-floor-ceiling}
+icc_levels <- P$icc_cutoffs[P$icc_cutoffs > 0]
+icc_cells <- expand_grid(lane_id = lanes$lane_id, cut = names(icc_levels), side = c("floor", "ceiling")) %>%
+  mutate(value = icc_levels[cut],
+         rows = pmap(list(lane_id, value, side), \(l, v, s) {
+           d <- filter(dat, lane_id == l, !is.na(icc))
+           if (s == "floor") filter(d, icc >= v) else filter(d, icc < v)
+         }),
+         n_features = map_int(rows, nrow),
+         threshold  = P$alpha_fwer / (P$meff_ratio * n_features),
+         hits       = map2_int(rows, threshold, ~ sum(.x$p < .y)),
+         frac_E_lenient = map_dbl(rows, ~ mean(.x$alpha_p < P$em_p_cutoffs[["lenient"]], na.rm = TRUE)),
+         frac_E_nominal = map_dbl(rows, ~ mean(.x$alpha_p < P$em_p_cutoffs[["nominal"]], na.rm = TRUE))) %>%
+  left_join(select(lanes, lane_id, lane = label, E), by = "lane_id") %>%
+  transmute(Lane = lane, Exposure = E, Restriction = paste0("ICC ", if_else(side == "floor", ">= ", "< "), value),
+            Features = n_features, `FWER threshold` = signif(threshold, 3), Hits = hits,
+            `E-associated, p < 0.10` = round(frac_E_lenient, 3),
+            `E-associated, p < 0.05` = round(frac_E_nominal, 3))
+write_exp(icc_cells, "icc_floor_ceiling")
+
+icc_cells %>%
+  kable(caption = paste("Hits and the share of E-associated features under an ICC floor and an",
+                        "ICC ceiling. If the floor retains a lower share of E-associated features",
+                        "than the ceiling, the tension is confirmed and the floor stays out of the",
+                        "design.")) %>%
+  kable_styling(full_width = FALSE)
+```
+
+# 9. Open items
+
+* **ICC provenance.** `results/qc/metabolite_icc-mesa.csv` is written by 01c from
+  **participant repeated measures** across MESA exams (not QC-pool replicates): one-way
+  random-effects ICC(1) for unbalanced groups, among participants profiled at two or more
+  exams, on the analysis-scale values (01a's half-minimum imputation, log2 and 5-SD
+  winsorisation).
+* **QC-pool CV.** 01a computes it per feature on the raw intensity scale over the pooled QC
+  samples, before any QC step, and writes it per feature to
+  `results/qc/metabolite_qc_pool_cv-mesa.csv` from 2026-09-14. D3 is skipped until 01a has
+  been re-run with that export.
+* **Annotation table.** `results/met_info-mesa.csv` (01a): a feature counts as annotated when
+  it carries a compound name (`Metabolite`) or an HMDB ID.
+* **M_eff.** A single approximation, one third of the features a design retains, stands in
+  here. The pipeline itself now thresholds the full panel with Li & Ji (2005) and exports a
+  simulated max-statistic threshold (02b); neither is computed per design subset.
+* **Not implemented:** the sign-consistent one-sided test (6F) is dropped for now, since it
+  needs published GxE directions rather than the MESA estimate, which involves Y x G.
+
+```{r session}
+sessionInfo()
+```
