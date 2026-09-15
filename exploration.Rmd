@@ -340,7 +340,7 @@ anything in 6B. Enrichment of small p among annotated features, relative to unan
 ones, would be design-level evidence that the restriction concentrates signal rather than
 merely reducing the test count.
 
-```{r calibration}
+```{r calibration, results = 'asis'}
 lambda_gc <- function(p) median(qchisq(p, 1, lower.tail = FALSE)) / qchisq(0.5, 1)
 
 icc_breaks <- quantile(features$icc, c(0, 1/3, 2/3, 1), na.rm = TRUE)
@@ -380,7 +380,7 @@ overall <- dat %>% group_by(lane_id) %>% summarise(lambda = lambda_gc(p))
 l_cetp <- overall$lambda[overall$lane_id == "cetp_bmi_hdl"]
 l_clasp <- overall$lambda[overall$lane_id == "clasp1_mvpa_hdl"]
 if (length(l_cetp) && length(l_clasp))
-  cat(sprintf("\n**CETP versus CLASP1:** lambda %.3f versus %.3f. %s\n", l_cetp, l_clasp,
+  cat(sprintf("\n\n**CETP versus CLASP1:** lambda %.3f versus %.3f. %s\n\n", l_cetp, l_clasp,
               if (l_cetp > l_clasp) paste("CETP exceeds CLASP1: settle robust or location-scale",
                                           "inference before reading the hits surface.")
               else "CETP does not exceed CLASP1."))
