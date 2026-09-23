@@ -229,7 +229,10 @@ the reason it is not selection on them):
 2026-09-22, so pull the notebooks before running anything — an old `02c` against the new
 `anchors.csv` would launch 24 pathway jobs it should skip):
 
-1. `02b`: uncomment the MWIS chunk and re-run it. The four existing primary lanes are already in
+1. `02b`: set `RUN$mwis <- TRUE` (the default) and run. Which stages fit is set by the `RUN`
+   list at the top of the notebook rather than by commenting chunks in and out; `RUN$m_e_mwide`
+   defaults to `FALSE` because that stage is ~6,400 kinship fits whose output rarely changes.
+   The four existing primary lanes are already in
    `results/GxM_results.csv` and are **not** refit. New fits: 2 control lanes x 1,687 alignable
    features = 3,374, plus `lhx1_mvpa_hdl` over the full 3,219 because a primary lane gets the
    whole panel — about **6,600 in total, two thirds of one MWIS run**. The M~E chunk does not
