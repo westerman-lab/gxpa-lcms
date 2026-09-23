@@ -286,7 +286,14 @@ if (!is.null(lanes_all) && !("lane_id" %in% names(lanes_all))) {
   warning("anchors.csv has no lane_id column - publish the current version (see README).")
   lanes_all <- NULL
 }
-if (!is.null(lanes_all)) lanes_all <- mutate(lanes_all, include = as.logical(include))
+if (!is.null(lanes_all)) {
+  lanes_all <- mutate(lanes_all, include = as.logical(include))
+  # A control lane is screened only to calibrate 03c's cross-cohort statistics and is never
+  # a result. Dropping it here rather than at each use keeps it out of the declared-lane
+  # table, the lane count in the threshold prose, and both genotype QC tables -- all of
+  # which read lanes_all rather than the include-filtered anchors.
+  if ("role" %in% names(lanes_all)) lanes_all <- filter(lanes_all, role != "control")
+}
 anchors <- if (!is.null(lanes_all)) filter(lanes_all, include) else NULL
 
 # The primary lane (first included row) defines the Table S1 sample; see 02a.

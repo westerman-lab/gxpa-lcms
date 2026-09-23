@@ -111,8 +111,38 @@ outcome or an exposure itself, so adding, removing or parking a lane is one row 
 | `G`, `Y`, `E` | Dosage column, outcome and exposure, as named in the analysis frame. `G` must equal the `cpaid` in `variants_of_interest.csv`, which in turn must equal `chr_pos_ref_alt` — `01b` names dosage columns from ref/alt, and `02b` stops if they disagree. |
 | `rsid`, `gene`, `label` | Display. |
 | `include` | `TRUE` = reported by `manuscript.Rmd`. `FALSE` lanes are **still screened** by `02b` and replicated by `03c`; their rows stay in `results/` and are simply not reported. |
+| `role` | `primary` (default) or `control`. See below. Optional: an `anchors.csv` without the column reads as all-primary. |
 | `extra_covars` | Optional covariates for this lane only, space-separated, added to its interaction models (GxE, the metabolome-wide screen, the GxCovar sensitivity) but not to the marginal Y~G / E~G checks, which lanes can share. |
 | `provenance` | Why the lane is here. |
+
+**Control lanes** (`role = "control"`) exist for one purpose: to calibrate the cross-cohort
+concordance statistic in `03c`. That statistic correlates a lane's MESA GxM estimates with its
+FHS ones across the whole alignable panel, and on its own it cannot distinguish a signal
+specific to the lane's SNP from an artifact of the exposure or the platform that would
+replicate for *any* SNP. A control lane holds the outcome, the exposure, the covariates and
+the feature set fixed and varies only `G`, which is exactly that comparison. They are
+screened and never reported:
+
+* `02b` screens them, but restricted to the **alignable panel**, and excludes them from the
+  known-association checks, the hit-driven sensitivity fits, `mesa_signif_GxMs.csv`, the
+  metabolome-wide M~E screen and `n_lanes`. That last exclusion is not cosmetic: `M_E_mwide`'s
+  design-only row set is the intersection over every lane sharing an exposure, so a control
+  lane sharing `mvpa_wins` would move the **primary** lanes' alpha.
+* `03c` screens them and reports their concordance beside the primary lanes', but gives them
+  no kinship refits, no meta-analysis and no place in the FHS threshold.
+* `02c`, `02a`, `01c`, `manuscript.Rmd` and `exploration.Rmd` drop them on read.
+
+Comparing correlations across SNPs is only valid if every lane screens the **same** features,
+so control lanes require `SCREEN_TOP_K <- NULL` (the full alignable panel) in `03c`; `02b`'s
+restriction of controls to that same panel is what keeps the two sides matched, and `03c`
+restricts the contrast to the features every lane in a (Y, E) family carries.
+
+The contrast itself is a **paired cluster bootstrap on the difference** `r_primary - r_control`:
+one resample of coelution blocks is applied to every lane at once, so the noise the lanes share
+cancels instead of accumulating. That is why two control lanes suffice — a test that treated
+controls as a sample from a distribution would need ten or more to estimate its spread.
+`CONTROL_N_FEATURES` in `02b` can subsample the panel if the control count ever grows; it is
+`NULL` (no subsampling) while there are only two.
 
 Rules enforced on read, in every notebook:
 
@@ -135,19 +165,46 @@ right-hand side of a model, never on the left -- which is also why HDL and TG ar
 forward. BMI is left untransformed (per-allele FTO effects are conventionally reported in
 kg/m2), whereas the lipid outcomes are logged.
 
-# Project status (2026-09-14)
+# Project status (2026-09-22)
 
-**Lanes** (`anchors.csv`): `clasp1_mvpa_hdl` and `cetp_bmi_hdl` are reported; `fto_mvpa_bmi` is
-screened but not reported (`include = FALSE`). `cetp_bmi_tg` was removed on 2026-09-14.
+**Lanes** (`anchors.csv`): 5 primary + 2 control. Reported: `clasp1_mvpa_hdl`, `cetp_bmi_hdl`.
+Screened but not reported (`include = FALSE`): `fto_mvpa_bmi`, `lipc_bmi_tg`, `lhx1_mvpa_hdl`.
+Controls: `fads_mvpa_hdl` and `fads_mvpa_bmi`, one per MVPA family (added 2026-09-22).
+`cetp_bmi_tg` was removed on 2026-09-14.
 
-**Where the applied results stand.** The last full `02b` run (2026-09-14, four lanes, before the
-changes below) found nothing beyond chance in the reported lanes: 4 and 2 hits at the old threshold
-against about 3 expected per lane under the global null, with flat QQ plots. Under Li & Ji no
-reported-lane hit survives. Most of the FTO lane's 21 hits were sodium-formate cluster ions in the
-C18-neg void volume, which is what motivated the void-volume filter. The earlier Aug-1 finding still
-frames the paper: the CLASP1 hits are not mediators under the dilution identity (their M~E coupling
-is ~100x too small to carry the observed GxE), so the applied section is likely an honest worked
-example with a stated limitation. `exploration.Rmd` exists to settle that on design grounds.
+**Where the applied results stand.** The screen is calibrated and empty. The 2026-09-16 `02b` run
+(3,219 features after the void-volume filter, Li & Ji M_eff 1,020, p < 4.9e-5) returns **zero hits
+in all four lanes**, with lambda 0.96-1.09 and best p 6.6e-5 to 4.2e-4. Nothing survives the
+pre-committed D2 design. The dilution identity explains why rather than excusing it: with
+beta_GxE ~ -0.026 and typical |alpha| ~ 0.03-0.05, the implied per-feature interaction is ~1e-3,
+about an order of magnitude below the MDE at n ~ 9,000.
+
+**FHS (2026-09-21, top-100 per lane).** 1,687 of 3,219 features are alignable (52%); n ~ 2,900;
+SE inflation 2.0-4.0x. **No feature replicates** -- the three rows that clear FHS's own threshold
+are 5.5-6.8x MESA's beta and heterogeneous with it (Cochran p 0.002-0.004), i.e. FHS-specific.
+What did appear is **panel-wide concordance**: MESA-vs-FHS effect correlation of 0.563 (CLASP1)
+and 0.361 (FTO), block-permutation p <= 0.0005, against 0.081 (CETP) and -0.103 (LIPC). It
+survives adjustment for alpha (partial r 0.572, so not dilution), rises with ICC (0.21/0.70/0.74
+by tertile for CLASP1, flat or negative in the null lanes), and has regression slope 0.79 --
+shrunk as winner's curse predicts, not a scale artifact.
+
+**That result is why the control lanes exist.** A cross-cohort correlation alone cannot separate a
+G-specific signal from an exposure- or platform-level artifact, and the FTO lane makes the worry
+concrete: its outcome-level GxE is exactly zero in MESA (beta = -0.0002, p = 0.97), so the dilution
+identity predicts no concordance at all, yet r = 0.36. The control is rs102275 (FADS), never
+ascertained on physical activity, at MAF 0.426 — at or above every MVPA anchor, so a null from it
+cannot be blamed on power. **Until that comparison is run, the concordance result is not
+reportable.**
+
+The other GxPA loci in the panel -- LHX1, PTPRZ1, and the too-rare SNTA1 and CNTNAP2 -- are
+**positive** comparators, not negative ones: they were reported for MVPA interaction on HDL-C by
+the same scan that produced CLASP1. `lhx1_mvpa_hdl` was added as a primary lane on 2026-09-22 for
+that reason. It makes the design a predicted gradient rather than a single contrast: if the
+concordance statistic tracks real GxPA biology, reported GxPA loci should concord more than the
+never-ascertained controls, and LHX1 at MAF 0.396 is better powered than CLASP1 at 0.148.
+
+The Aug-1 finding still frames the paper: the CLASP1 hits are not mediators under the dilution
+identity, so the applied section is an honest worked example with a stated limitation.
 
 **Decisions** (dated; "after results" marks a choice made after GxM results had been seen, with
 the reason it is not selection on them):
@@ -161,22 +218,36 @@ the reason it is not selection on them):
 | 2026-09-14 | C18-neg features with RT < 1 min removed in `01a` (after results; on QC grounds: 798 features, half the ICC of the rest, 0.3% annotated, inflating lambda in every lane including null ones). |
 | 2026-09-14 | Fasting glucose and HbA1c: harmonized in `01c`, excluded from every analysis and from the report. |
 | 2026-09-14 | Design audit (`exploration.Rmd`): primary design D2 (annotated features) pre-committed before the audit is run; M_eff approximated as one third of the features a design retains; the sign-consistent one-sided test is dropped for now (it needs published GxE directions). |
+| 2026-09-16 | Variant panel corrected in `variants_of_interest.csv` (LIPC, APOC1, DOCK7/ANGPTL3 positions/alleles; blank alts filled; TCF7L2 rs7903146 added as a positive control). LIPC HDL-C went from meaningless to -0.114, p = 3.2e-9; every other locus unchanged to three digits. |
+| 2026-09-16 | `lipc_bmi_tg` added as a lane on **external** grounds (2022 vQTL panel, TG x BMI p = 6e-9 in UKB), `include = FALSE`. MESA's own GxE (p = 0.048, same direction) is reported as consistency, not as the reason the lane exists. |
+| 2026-09-22 | FHS screen moved to the **full alignable panel** (`SCREEN_TOP_K <- NULL`). Required by the control comparison, which needs every lane on one feature set; it also supplies the metabolome-wide meta-analysis. |
+| 2026-09-22 | The contrast is a **paired cluster bootstrap on the difference** `r_primary - r_control`, not a comparison against a control distribution: one resample of coelution blocks is applied to every lane at once, so the shared feature-sampling noise cancels. That is what makes two control lanes sufficient where a distribution-based test would have needed ten. Validated on synthetic lanes: with one control and only 100 features, a true delta of 0.61 gives p = 1e-6 and a weak one of 0.38 gives p = 0.004. |
+| 2026-09-22 | `lhx1_mvpa_hdl` added as a **primary** lane (`include = FALSE`), on the external report (same GxPA-HDL-C scan as CLASP1), not on MESA's own GxE, which is flat (p = 0.98). It is the positive comparator for the concordance statistic. Every `mvpa_wins` lane SNP has call rate 1.0, so adding it does not change `M_E_mwide`'s shared row set or the primary lanes' alpha. PTPRZ1 was not added; SNTA1 and both CNTNAP2 alleles remain unusable on MAF (0.010, 0.008, 0.0003). |
+| 2026-09-22 | **Control lanes** (`role = "control"`): two, `fads_mvpa_hdl` and `fads_mvpa_bmi`, one per MVPA family, screened over the alignable panel and never reported. Declared *before* any control estimate was seen, to calibrate the cross-cohort concordance statistic. **Eligibility is ascertainment, not MESA's GxE p-value:** a SNP reported for a physical-activity interaction anywhere cannot be an MVPA control, however null it looks here — which rules out the whole `old` GxPA set (CLASP1, LHX1, SNTA1, PTPRZ1, CNTNAP2) and FTO. rs102275 (TMEM258/FADS1-2) was chosen on two grounds: MAF 0.426 is at or above every MVPA anchor (CLASP1 0.148, LHX1 0.396, FTO 0.399), so a null result cannot be blamed on the control being underpowered; and the fatty-acid desaturase locus has large metabolome-wide main effects, making it the most stringent available test of whether broad metabolite association alone produces concordance. |
 
-**To re-run on Terra, in order** (the metabolome changed, so the screen must be refit, not just
-re-thresholded):
+**To re-run on Terra, in order** (for the control-lane comparison; `anchors.csv` was republished
+2026-09-22, so pull the notebooks before running anything — an old `02c` against the new
+`anchors.csv` would launch 24 pathway jobs it should skip):
 
-1. `01a` (void-volume filter, per-feature QC-pool CV), then `01c` (merged frame, ICCs, QC exports).
-2. `02a`, then `02b` in full: MWIS fit (uncomment its chunk), threshold, the metabolome-wide M~E
-   chunk (about as costly as the MWIS; set `EM_KINSHIP <- FALSE` for the fast iid version), and the
-   sensitivity chunks.
-3. `02c` and `03c`. Optionally `01b`, which now annotates the FTO row of `genotype_qc` correctly.
+1. `02b`: uncomment the MWIS chunk and re-run it. The four existing primary lanes are already in
+   `results/GxM_results.csv` and are **not** refit. New fits: 2 control lanes x 1,687 alignable
+   features = 3,374, plus `lhx1_mvpa_hdl` over the full 3,219 because a primary lane gets the
+   whole panel — about **6,600 in total, two thirds of one MWIS run**. The M~E chunk does not
+   need re-running: control lanes are excluded from it by design and LHX1's call rate is 1.0, so
+   `M_E_mwide_*.csv` is unchanged either way.
+2. `03c` with `SCREEN_TOP_K <- NULL`: 7 lanes x 1,687 alignable features, about **11,800 `lm`
+   fits** (kinship refits are primary-lane only). The fit cell
+   times one fit and prints an estimate before the loop, and checkpoints every `CHUNK` fits with
+   resume, so an interrupted run continues rather than restarting.
+3. `02c` only if pathway results need refreshing; it now skips control lanes.
 4. Locally: copy `results/` down, then render `manuscript.Rmd` and `exploration.Rmd`.
 
-**Open decisions:** correction across lanes (the threshold is per lane); whether the max statistic
-should replace Li & Ji as primary if it is materially stricter; a BMI precision covariate for
-`clasp1_mvpa_hdl` (`extra_covars`); M~G / variance-heterogeneity diagnostics for the FTO and CETP
-(vQTL-derived) lanes; `manuscript.Rmd` does not yet render the FHS replication or mummichog outputs;
-published GxE signs for the one-sided audit test.
+**Open decisions:** which lanes the manuscript reports, and whether the vignette rests on the
+MVPA pair (CLASP1 + FTO, same exposure, one anchor reproducing and one not) — pending the control
+result; correction across lanes (the threshold is per lane); whether the max statistic should
+replace Li & Ji as primary; a BMI precision covariate for `clasp1_mvpa_hdl` (`extra_covars`);
+`manuscript.Rmd` does not yet render the FHS screen, the concordance/control comparison or the
+mummichog outputs; published GxE signs for the one-sided audit test.
 
 # Repository workflow
 

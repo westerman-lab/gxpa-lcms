@@ -103,6 +103,10 @@ read_config <- function(name) {
 anchors_cfg <- read_config("anchors.csv")
 if (is.null(anchors_cfg$data)) stop("anchors.csv is not available from the bucket or the repo.", call. = FALSE)
 lanes <- anchors_cfg$data %>% mutate(include = as.logical(include))
+# Control lanes are screened by 02b for one purpose: to give 03c's cross-cohort statistics
+# a null distribution. They are not candidate results, so they take no part in a design
+# audit -- and letting them in would also make their exposures required inputs below.
+if ("role" %in% names(lanes)) lanes <- filter(lanes, role != "control")
 if (!is.null(P$anchors)) lanes <- filter(lanes, lane_id %in% P$anchors)
 log_input("anchors.csv", anchors_cfg$source, paste(nrow(lanes), "lanes audited"))
 
