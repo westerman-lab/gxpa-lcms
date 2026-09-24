@@ -179,6 +179,17 @@ pre-committed D2 design. The dilution identity explains why rather than excusing
 beta_GxE ~ -0.026 and typical |alpha| ~ 0.03-0.05, the implied per-feature interaction is ~1e-3,
 about an order of magnitude below the MDE at n ~ 9,000.
 
+> **The 2026-09-21 FHS results below are INVALID and must not be reported or reasoned from.**
+> The screen's formula builder interpolated `M_aligned`, a *column*, inside
+> `paste(collapse='+')`, so the nine `gPC * M` adjustment terms collapsed into one string
+> naming every metabolite in the screen table, identical for every fit. Each of those 400
+> fits therefore adjusted for ~400 unrelated metabolites and their gPC interactions. Fixed
+> 2026-09-24; `results/fhs_gxm_screen.csv` and `results/fhs_screen_concordance.csv` must be
+> **deleted** before re-running, or the fit cell will resume from the corrupted rows. The
+> MESA screen is unaffected -- `02b` uses a `'<M>'` placeholder substituted per row.
+> Everything in this paragraph, including the concordance result that motivated the control
+> lanes, is pending re-estimation.
+
 **FHS (2026-09-21, top-100 per lane).** 1,687 of 3,219 features are alignable (52%); n ~ 2,900;
 SE inflation 2.0-4.0x. **No feature replicates** -- the three rows that clear FHS's own threshold
 are 5.5-6.8x MESA's beta and heterogeneous with it (Cochran p 0.002-0.004), i.e. FHS-specific.
