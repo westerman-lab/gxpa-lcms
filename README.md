@@ -238,25 +238,33 @@ the reason it is not selection on them):
 | 2026-10-09 | `03c` matches **Amide-neg features to the aligned panel by compound name** (all 142 match one-to-one) instead of dropping them. Their ids are built from row position in each dataset, so the suffix-stripping rule used for the other methods would point 135 of 142 at a different compound. Adds 135 features per primary lane (1,687 -> 1,822 alignable). Prompted by checking whether one feature (Lac-Met) had been tested in FHS, but it adds the whole Amide-neg panel, not that feature. `02b` still screens control lanes without Amide-neg, so the control contrast, which uses only the features a (Y, E) family shares, is unchanged for the MVPA families; each lane's own r now includes them. Amide-neg features are their own concordance blocks (targeted MRM: a shared retention time does not make them adducts of one compound). |
 | 2026-10-09 | `02b`: the per-hit M~E model gains the metabolite batch term the MWIS and `M_E_mwide` already carry (a code inconsistency; no effect while the screen has no hits). The lane GxEs are also refit on the screen's sample, rows with any metabolite measured, into `results/GxE_mwis_sample.csv`: the dilution identity holds within one sample, and `GxE.csv` uses every participant with Y, E and G (n ~ 12,300 vs ~ 9,300). `GxE.csv` itself is unchanged. |
 
-**To re-run on Terra, in order** (for the control-lane comparison; `anchors.csv` was republished
-2026-09-22, so pull the notebooks before running anything — an old `02c` against the new
-`anchors.csv` would launch 24 pathway jobs it should skip):
+**To re-run on Terra, in order** (as of 2026-10-09: picks up the `03c` Amide-neg fix and the
+sample-matched GxE export in `02b`; `git pull` the notebooks first):
 
-1. `02b`: set `RUN$mwis <- TRUE` (the default) and run. Which stages fit is set by the `RUN`
-   list at the top of the notebook rather than by commenting chunks in and out; `RUN$m_e_mwide`
-   defaults to `FALSE` because that stage is ~6,400 kinship fits whose output rarely changes.
-   The four existing primary lanes are already in
-   `results/GxM_results.csv` and are **not** refit. New fits: 2 control lanes x 1,687 alignable
-   features = 3,374, plus `lhx1_mvpa_hdl` over the full 3,219 because a primary lane gets the
-   whole panel — about **6,600 in total, two thirds of one MWIS run**. The M~E chunk does not
-   need re-running: control lanes are excluded from it by design and LHX1's call rate is 1.0, so
-   `M_E_mwide_*.csv` is unchanged either way.
-2. `03c` with `SCREEN_TOP_K <- NULL`: 7 lanes x 1,687 alignable features, about **11,800 `lm`
-   fits** (kinship refits are primary-lane only). The fit cell
-   times one fit and prints an estimate before the loop, and checkpoints every `CHUNK` fits with
-   resume, so an interrupted run continues rather than restarting.
-3. `02c` only if pathway results need refreshing; it now skips control lanes.
-4. Locally: copy `results/` down, then render `manuscript.Rmd` and `exploration.Rmd`.
+0. Make the VM's `results/` match the bucket before running anything. Each notebook's final cell
+   pushes **every** `results/*.csv` on the VM, including files that run did not rewrite (e.g.
+   `M_E_mwide_*.csv` while `RUN$m_e_mwide` is `FALSE`), so a stale leftover would overwrite the
+   bucket's copy:
+   `gcloud storage cp "$WORKSPACE_BUCKET/results/*.csv" results/` and
+   `gcloud storage cp "$WORKSPACE_BUCKET/results/qc/*.csv" results/qc/`.
+   The resume checkpoints (`GxM_results.csv` in `02b` and `03c`, `fhs_gxm_screen.csv` in `03c`)
+   are also checked against the bucket by `sync_checkpoint()` before any resume: a missing local
+   copy is fetched, and a local copy that differs stops the notebook with instructions.
+1. `02b` with `RUN$mwis <- FALSE` and `RUN$mwis_refit <- FALSE`: the screen itself is unchanged.
+   (The defaults would also be safe now -- the resume finds every row -- but `FALSE` skips the
+   stage outright.) `known_assoc` refits Y~G, E~G and GxE, tens of fits, and adds the five lane
+   GxEs on the screen's sample (`GxE_mwis_sample.csv`); `sensitivity` rewrites the follow-up files
+   empty while the screen has no hits; `exports` rewrites `analysis_params.csv`. The resume cell
+   still runs and should report **19,469 fits carried over, 0 to run**.
+2. `03c`: fits only the Amide-neg rows the checkpoint lacks -- about **675 `lm` fits** (135 per
+   primary lane) -- then refits any new top-20 entries with kinship. The checkpoint line should
+   report **11,795 fits already in the checkpoint**; anything near 12,000 to run means the
+   checkpoint was not found. Concordance outputs move slightly: each lane's own r now includes
+   Amide-neg, while the MVPA control contrast does not (controls carry no Amide-neg in `02b`).
+3. `02c` only if pathway results need refreshing.
+4. Locally: copy `results/` down and check each file's MD5 against the bucket
+   (`gcloud storage ls -L "$WORKSPACE_BUCKET/results/**"`) before reading anything, then render
+   `manuscript.Rmd` and `exploration.Rmd`.
 
 **Open decisions:** which lanes the manuscript reports, and whether the vignette rests on the
 MVPA pair (CLASP1 + FTO, same exposure, one anchor reproducing and one not) — pending the control
