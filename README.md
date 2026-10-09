@@ -236,10 +236,10 @@ the reason it is not selection on them):
 | 2026-09-22 | `lhx1_mvpa_hdl` added as a **primary** lane (`include = FALSE`), on the external report (same GxPA-HDL-C scan as CLASP1), not on MESA's own GxE, which is flat (p = 0.98). It is the positive comparator for the concordance statistic. Every `mvpa_wins` lane SNP has call rate 1.0, so adding it does not change `M_E_mwide`'s shared row set or the primary lanes' alpha. PTPRZ1 was not added; SNTA1 and both CNTNAP2 alleles remain unusable on MAF (0.010, 0.008, 0.0003). |
 | 2026-09-22 | **Control lanes** (`role = "control"`): two, `fads_mvpa_hdl` and `fads_mvpa_bmi`, one per MVPA family, screened over the alignable panel and never reported. Declared *before* any control estimate was seen, to calibrate the cross-cohort concordance statistic. **Eligibility is ascertainment, not MESA's GxE p-value:** a SNP reported for a physical-activity interaction anywhere cannot be an MVPA control, however null it looks here — which rules out the whole `old` GxPA set (CLASP1, LHX1, SNTA1, PTPRZ1, CNTNAP2) and FTO. rs102275 (TMEM258/FADS1-2) was chosen on two grounds: MAF 0.426 is at or above every MVPA anchor (CLASP1 0.148, LHX1 0.396, FTO 0.399), so a null result cannot be blamed on the control being underpowered; and the fatty-acid desaturase locus has large metabolome-wide main effects, making it the most stringent available test of whether broad metabolite association alone produces concordance. |
 | 2026-10-09 | `03c` matches **Amide-neg features to the aligned panel by compound name** (all 142 match one-to-one) instead of dropping them. Their ids are built from row position in each dataset, so the suffix-stripping rule used for the other methods would point 135 of 142 at a different compound. Adds 135 features per primary lane (1,687 -> 1,822 alignable). Prompted by checking whether one feature (Lac-Met) had been tested in FHS, but it adds the whole Amide-neg panel, not that feature. `02b` still screens control lanes without Amide-neg, so the control contrast, which uses only the features a (Y, E) family shares, is unchanged for the MVPA families; each lane's own r now includes them. Amide-neg features are their own concordance blocks (targeted MRM: a shared retention time does not make them adducts of one compound). |
-| 2026-10-09 | `02b`: the per-hit M~E model gains the metabolite batch term the MWIS and `M_E_mwide` already carry (a code inconsistency; no effect while the screen has no hits). The lane GxEs are also refit on the screen's sample, rows with any metabolite measured, into `results/GxE_mwis_sample.csv`: the dilution identity holds within one sample, and `GxE.csv` uses every participant with Y, E and G (n ~ 12,300 vs ~ 9,300). `GxE.csv` itself is unchanged. |
+| 2026-10-09 | `02b`: the per-hit M~E model gains the metabolite batch term the MWIS and `M_E_mwide` already carry (a code inconsistency; no effect while the screen has no hits). The lane GxEs are also refit on **each LC-MS method's sample** into `results/GxE_mwis_sample.csv` (one row per lane per method): the dilution identity holds within one sample, `GxE.csv` uses every participant with Y, E and G (n ~ 12,300), and the methods were not run on the same rows (C8/C18/HILIC ~ 10,200 rows each, Amide-neg ~ 8,200, all four 8,170), so each fit's n should equal the MWIS n for that lane and method. The first version, run the same day, used the union of methods (n 11,219) and matched no feature's sample. `GxE.csv` itself is unchanged. That run also lost 26 of 33 Y~G fits to dying prescheduled workers and pushed the result over the good `Y_G.csv`; the Y~G, E~G and GxE fits now fork one worker per fit and refuse to write a checkpoint containing a failed fit. |
 
-**To re-run on Terra, in order** (as of 2026-10-09: picks up the `03c` Amide-neg fix and the
-sample-matched GxE export in `02b`; `git pull` the notebooks first):
+**To re-run on Terra, in order** (as of 2026-10-09, second run: restores `Y_G.csv` and fits the
+per-method GxE in `02b`; `git pull` the notebooks first):
 
 0. Make the VM's `results/` match the bucket before running anything. Each notebook's final cell
    pushes **every** `results/*.csv` on the VM, including files that run did not rewrite (e.g.
@@ -250,17 +250,15 @@ sample-matched GxE export in `02b`; `git pull` the notebooks first):
    The resume checkpoints (`GxM_results.csv` in `02b` and `03c`, `fhs_gxm_screen.csv` in `03c`)
    are also checked against the bucket by `sync_checkpoint()` before any resume: a missing local
    copy is fetched, and a local copy that differs stops the notebook with instructions.
-1. `02b` with `RUN$mwis <- FALSE` and `RUN$mwis_refit <- FALSE`: the screen itself is unchanged.
-   (The defaults would also be safe now -- the resume finds every row -- but `FALSE` skips the
-   stage outright.) `known_assoc` refits Y~G, E~G and GxE, tens of fits, and adds the five lane
-   GxEs on the screen's sample (`GxE_mwis_sample.csv`); `sensitivity` rewrites the follow-up files
-   empty while the screen has no hits; `exports` rewrites `analysis_params.csv`. The resume cell
-   still runs and should report **19,469 fits carried over, 0 to run**.
-2. `03c`: fits only the Amide-neg rows the checkpoint lacks -- about **675 `lm` fits** (135 per
-   primary lane) -- then refits any new top-20 entries with kinship. The checkpoint line should
-   report **11,795 fits already in the checkpoint**; anything near 12,000 to run means the
-   checkpoint was not found. Concordance outputs move slightly: each lane's own r now includes
-   Amide-neg, while the MVPA control contrast does not (controls carry no Amide-neg in `02b`).
+1. `02b` with `RUN$mwis <- FALSE` and `RUN$mwis_refit <- FALSE` (the screen is unchanged);
+   `known_assoc`, `sensitivity` and `exports` stay `TRUE`. `known_assoc` refits Y~G, E~G and GxE
+   (tens of fits, one worker each) and writes `GxE_mwis_sample.csv`: **20 rows**, one per lane per
+   method, whose n should equal the MWIS n for that lane and method (CLASP1: C8 9,245, C18 9,250,
+   HILIC 9,251, Amide-neg 7,283). If any fit fails, the cell stops before writing, so nothing is
+   pushed; rerun it. `Y_G.csv` should come back with all 33 rows numeric. The resume cell still
+   runs and should report **19,469 fits carried over, 0 to run**.
+2. `03c` does not need re-running: its Amide-neg rows were fitted on 2026-10-09. The next run that
+   does resume will keep kinship labels, but cannot restore the 26 lost on 2026-10-09.
 3. `02c` only if pathway results need refreshing.
 4. Locally: copy `results/` down and check each file's MD5 against the bucket
    (`gcloud storage ls -L "$WORKSPACE_BUCKET/results/**"`) before reading anything, then render
