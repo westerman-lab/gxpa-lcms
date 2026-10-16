@@ -9,9 +9,16 @@ row, 2026-10-16), and the code side is implemented:
 - `specs/fto_pa_bmi_checks.R` runs Stage 0a, the D2 sensitivity and the Stage A checks from inside
   the 02b kernel.
 
-Stages A and B are now one 02b run with a pause after the known associations; README's "To re-run
-on Terra" has the steps. **Nothing has been fitted yet.** Still to do after the run: B3 and B4
-(scratch), B5, and recording the numbers in README.
+Stages A and B ran as one 02b run with a pause after the known associations; README's "To re-run
+on Terra" has the steps. **Done 2026-10-16.**
+- D2: exam-5 `exercm` looks rescored; Kenny kept it as is.
+- B3, B4 and B5 were done in scratch, plus an `exploration.Rmd` re-render.
+- The numbers are in README's decisions table (three 2026-10-16 rows).
+
+Outcome: a clean null. The GxE is +0.006 (p 0.26) in all participants but ~0 in the metabolomics
+samples. The screen is unchanged (r 0.998 with `fto_mvpa_bmi`, zero hits), and nothing survives
+any audit design. Exercise's metabolite associations mirror BMI's more than MVPA's do (r -0.72 vs
+-0.56).
 
 Read `CLAUDE.md` and README's **Project status** before starting; their contracts and working
 agreements apply throughout and are not repeated here.
