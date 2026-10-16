@@ -58,7 +58,8 @@ published to the workspace bucket by the notebook that makes it, and rendered by
 | `02a` | `table_s1_characteristics`, `analysis_n_by_exam`, `covariate_ladder`, `covariate_variance_explained`, `mpc_covariate_pvalues` | Table S1, and the evidence for the adjustment set |
 | `02b` | `m_eff_estimators`, `metabolite_eigenvalues` | The effective number of tests under Bonferroni, simpleM (99.5%), Li & Ji (used) and a simulated max statistic |
 
-`02b` also writes, to `results/` itself: `Y_G`, `E_G`, `GxE`, `GxM_results` (the full screen),
+`02b` also writes, to `results/` itself: `Y_E`, `Y_G`, `E_G`, `GxE`, `GxE_mwis_sample` (the lane
+GxEs on each LC-MS method's sample), `GxM_results` (the full screen),
 `mesa_signif_GxMs` (hits; read by `03c`), `M_E` and `GxMpGxEpGxC` (sensitivity models for the hits),
 `M_E_mwide_<exposure>` (metabolome-wide M~E, one file per lane exposure) and `analysis_params`
 (threshold, estimator name, and the max-statistic threshold).
@@ -167,8 +168,9 @@ kg/m2), whereas the lipid outcomes are logged.
 
 # Project status (2026-09-22)
 
-**Lanes** (`anchors.csv`): 5 primary + 2 control. Reported: `clasp1_mvpa_hdl`, `cetp_bmi_hdl`.
-Screened but not reported (`include = FALSE`): `fto_mvpa_bmi`, `lipc_bmi_tg`, `lhx1_mvpa_hdl`.
+**Lanes** (`anchors.csv`): 6 primary + 2 control. Reported: `clasp1_mvpa_hdl`, `cetp_bmi_hdl`.
+Screened but not reported (`include = FALSE`): `fto_mvpa_bmi`, `lipc_bmi_tg`, `lhx1_mvpa_hdl`,
+`fto_pa_bmi` (FTO x intentional exercise, added 2026-10-16; see `specs/fto_pa_bmi_lane.md`).
 Controls: `fads_mvpa_hdl` and `fads_mvpa_bmi`, one per MVPA family (added 2026-09-22).
 `cetp_bmi_tg` was removed on 2026-09-14.
 
@@ -238,39 +240,51 @@ the reason it is not selection on them):
 | 2026-10-09 | `03c` matches **Amide-neg features to the aligned panel by compound name** (all 142 match one-to-one) instead of dropping them. Their ids are built from row position in each dataset, so the suffix-stripping rule used for the other methods would point 135 of 142 at a different compound. Adds 135 features per primary lane (1,687 -> 1,822 alignable). Prompted by checking whether one feature (Lac-Met) had been tested in FHS, but it adds the whole Amide-neg panel, not that feature. `02b` still screens control lanes without Amide-neg, so the control contrast, which uses only the features a (Y, E) family shares, is unchanged for the MVPA families; each lane's own r now includes them. Amide-neg features are their own concordance blocks (targeted MRM: a shared retention time does not make them adducts of one compound). |
 | 2026-10-09 | `02b`: the per-hit M~E model gains the metabolite batch term the MWIS and `M_E_mwide` already carry (a code inconsistency; no effect while the screen has no hits). The lane GxEs are also refit on **each LC-MS method's sample** into `results/GxE_mwis_sample.csv` (one row per lane per method): the dilution identity holds within one sample, `GxE.csv` uses every participant with Y, E and G (n ~ 12,300), and the methods were not run on the same rows (C8/C18/HILIC ~ 10,200 rows each, Amide-neg ~ 8,200, all four 8,170), so each fit's n should equal the MWIS n for that lane and method. The first version, run the same day, used the union of methods (n 11,219) and matched no feature's sample. `GxE.csv` itself is unchanged. That run also lost 26 of 33 Y~G fits to dying prescheduled workers and pushed the result over the good `Y_G.csv`; the Y~G, E~G and GxE fits now fork one worker per fit and refuse to write a checkpoint containing a failed fit. |
 | 2026-10-09 | `03c` keeps a row's kinship label on resume. Before, the resume restored estimates but not `model`, so the refit block relabelled earlier kinship fits that had left the current top 20 as `lm`: 26 rows of the 2026-10-09 checkpoint carry kinship estimates labelled `ranking only`. Their estimates are correct; only the label is wrong. |
+| 2026-10-16 | `fto_pa_bmi` added as a primary lane (`include = FALSE`): FTO x **intentional exercise** (`pa_log` = log(`exercm` MET-h/wk + 1)) -> BMI, beside the unchanged `fto_mvpa_bmi`. **After results:** chosen after `fto_mvpa_bmi`'s GxE was null (p = 0.97), and after seeing that `mvpa_wins` is unrelated to BMI (p ~ 0.3, wrong direction) while `pa_log` tracks it strongly. The ground is construct validity: MESA's MVPA total (`pamvcm`) counts occupational, household and caregiving activity, whereas the FTO x PA literature measures leisure-time activity. Fixed before any G x `pa_log` estimate was seen. Predicted GxE sign **positive** (G counts the non-risk T allele). The spec's defaults (`specs/fto_pa_bmi_lane.md`), accepted by Kenny the same day: exposure `pa_log`; `pa`'s exam-5 jump (median ~2x exams 1-4, while MVPA is flat) is checked before the MWIS, with a GxE refit without exam 5 as sensitivity; no control lane, because FHS fits carry no PA term, so FTO's concordance carries over; the lane's MWIS and M~E run whatever its GxE shows; reported whatever the result. `02b` changes with it: Y~E is checkpointed to `results/Y_E.csv`; the metabolome-wide M~E resumes by exposure (an exposure whose file is in the bucket is not refitted), so `RUN$m_e_mwide` now defaults to `TRUE`. |
 
-**To re-run on Terra, in order** (as of 2026-10-09, second run: restores `Y_G.csv` and fits the
-per-method GxE in `02b`; `git pull` the notebooks first):
+**To re-run on Terra, in order** (as of 2026-10-16: fits the new `fto_pa_bmi` lane. `anchors.csv`
+is already published; `git pull` the notebooks first):
 
 0. Make the VM's `results/` match the bucket before running anything. Each notebook's final cell
    pushes **every** `results/*.csv` on the VM, including files that run did not rewrite (e.g.
-   `M_E_mwide_*.csv` while `RUN$m_e_mwide` is `FALSE`), so a stale leftover would overwrite the
-   bucket's copy:
+   an `M_E_mwide_*.csv` carried over), so a stale leftover would overwrite the bucket's copy:
    `gcloud storage cp "$WORKSPACE_BUCKET/results/*.csv" results/` and
    `gcloud storage cp "$WORKSPACE_BUCKET/results/qc/*.csv" results/qc/`.
    The resume checkpoints (`GxM_results.csv` in `02b` and `03c`, `fhs_gxm_screen.csv` in `03c`)
    are also checked against the bucket by `sync_checkpoint()` before any resume: a missing local
    copy is fetched, and a local copy that differs stops the notebook with instructions.
-1. `02b` with `RUN$mwis <- FALSE` and `RUN$mwis_refit <- FALSE` (the screen is unchanged);
-   `known_assoc`, `sensitivity` and `exports` stay `TRUE`. `known_assoc` refits Y~G, E~G and GxE
-   (tens of fits, one worker each) and writes `GxE_mwis_sample.csv`: **20 rows**, one per lane per
-   method, whose n should equal the MWIS n for that lane and method (CLASP1: C8 9,245, C18 9,250,
-   HILIC 9,251, Amide-neg 7,283). If any fit fails, the cell stops before writing, so nothing is
-   pushed; rerun it. `Y_G.csv` should come back with all 33 rows numeric. The resume cell still
-   runs and should report **19,469 fits carried over, 0 to run**.
-2. `03c` does not need re-running: its Amide-neg rows were fitted on 2026-10-09. The next run that
-   does resume will keep kinship labels, but cannot restore the 26 lost on 2026-10-09.
-3. `02c` only if pathway results need refreshing.
+1. `02b`, with the committed `RUN` defaults (every stage `TRUE`), in two halves. **First, from the
+   top down to the `## MWIS` heading** (the known associations: minutes). Then, in a scratch cell,
+   `source('specs/fto_pa_bmi_checks.R')` and copy its output into the session.
+   - Its section 1 shows whether `pa` (`exercm`) changed instrument at exam 5. If `pa` jumps
+     between exams 3 and 5 while `mvpa` does not, and the earlier steps are flat, **stop here**:
+     that is decision D2 in the spec, to settle before the hours-long fits.
+   - Section 3 should show every pre-existing row unchanged; `Y_G`, `E_G` and `GxE` one row longer;
+     `GxE_mwis_sample` 24 rows; `Y_E.csv` new.
+2. Otherwise **run the rest of `02b`**.
+   - The resume cell should report **19,469 fits carried over, 3,219 to run** (all `fto_pa_bmi`).
+   - The M~E cell should report that `M_E_mwide_mvpa_wins.csv` and `M_E_mwide_bmi_covariate.csv`
+     match the bucket, then **"M~E exposures to fit: pa_log"**.
+   - About 6,400 kinship fits in all. Expect `M_E_mwide_pa_log.csv` (3,219 rows, no fit errors) and
+     `analysis_params.csv` with `n_lanes` 6. The last cell pushes everything.
+3. Not needed:
+   - `01c`: `pa_log` is already in the frame, and the 01c edit only fixes a label in the
+     sample-flow table.
+   - `03c`: FHS has no PA variable, so its fits for `fto_pa_bmi` would duplicate `fto_mvpa_bmi`'s.
+   - `02c`.
 4. Locally: copy `results/` down and check each file's MD5 against the bucket
    (`gcloud storage ls -L "$WORKSPACE_BUCKET/results/**"`) before reading anything, then render
-   `manuscript.Rmd` and `exploration.Rmd`.
+   `manuscript.Rmd` and `exploration.Rmd`. `exploration.Rmd` requires `M_E_mwide_pa_log.csv`
+   (step 2). If you render before that, pass
+   `params = list(anchors = c('clasp1_mvpa_hdl','cetp_bmi_hdl','fto_mvpa_bmi','lipc_bmi_tg','lhx1_mvpa_hdl'))`.
 
 **Open decisions:** which lanes the manuscript reports, and whether the vignette rests on the
 MVPA pair (CLASP1 + FTO, same exposure, one anchor reproducing and one not) — pending the control
 result; correction across lanes (the threshold is per lane); whether the max statistic should
 replace Li & Ji as primary; a BMI precision covariate for `clasp1_mvpa_hdl` (`extra_covars`);
 `manuscript.Rmd` does not yet render the FHS screen, the concordance/control comparison or the
-mummichog outputs; published GxE signs for the one-sided audit test.
+mummichog outputs; published GxE signs for the one-sided audit test; which FTO lane the paper
+leads with, `fto_pa_bmi` or `fto_mvpa_bmi` (both go in the supplement).
 
 # Repository workflow
 

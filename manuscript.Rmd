@@ -209,7 +209,7 @@ threshold_source  <- if (have(params)) "read from analysis_params.csv" else "fal
 # Readable labels for outcomes and exposures.
 outcome_labels  <- c(hdl_log = "log(HDL-C)", tg_log = "log(TG)", bmi = "BMI",
                      fg = "Fasting glucose", hb = "HbA1c")
-exposure_labels <- c(mvpa_wins = "MVPA", bmi_covariate = "BMI", bmi = "BMI", sex = "Sex", smoking = "Smoking")
+exposure_labels <- c(mvpa_wins = "MVPA", pa_log = "Exercise", bmi_covariate = "BMI", bmi = "BMI", sex = "Sex", smoking = "Smoking")
 
 relabel <- function(x, lookup) coalesce(unname(lookup[x]), x)
 
@@ -222,7 +222,7 @@ qc_var_labels <- c(
   fg = "Fasting glucose (mg/dL)", hb = "HbA1c (%)",
   mvpa = "MVPA (MET-hours/week)", mvpa_wins = "MVPA, winsorized",
   mvpa_log = "log(MVPA + 1)", mvpa_trunc = "MVPA, truncated",
-  pa = "Total PA", mod_pa = "Moderate PA", vig_pa = "Vigorous PA",
+  pa = "Intentional exercise", mod_pa = "Moderate PA", vig_pa = "Vigorous PA",
   ahei_score = "AHEI-2010 score", dash_score = "DASH score",
   ses_score = "Neighbourhood SES score", drinks_per_week = "Alcohol (drinks/week)",
   sex = "Sex", race = "Race/ethnicity (self-identified)", smoking = "Smoking",
